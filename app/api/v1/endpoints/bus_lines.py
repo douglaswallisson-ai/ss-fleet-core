@@ -318,3 +318,66 @@ async def get_trip_compliance(
         summary=summary,
         trips=trips,
     )
+
+
+@router.get("/{line_id}/shifts", response_model=list[ShiftResponse])
+async def list_shifts(
+    line_id: int,
+    weekday: Optional[int] = Query(None, ge=0, le=6, description="0 = domingo"),
+    direction: Optional[int] = Query(None, ge=0, le=1, description="0 = ida, 1 = volta"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Turnos da linha — o que a operação chama de escala.
+
+    Filtrar por dia da semana é o uso mais comum: a escala de sábado é outra, e
+    trazer a semana inteira obrigaria o front a filtrar um volume que o banco
+    descarta com índice.
+
+    `weekday` é um array na tabela, então a comparação usa `ANY` — um turno
+    pode valer para vários dias.
+    """
+    groups = await _accessible_groups(db, user)
+    scope_sql, scope_params = _group_filter(groups)
+
+    # Confere o acesso pela linha antes de listar os turnos: sem isto, saber o
+    # id de uma linha de outra empresa bastaria para ler a escala dela.
+    linha = (
+        await db.execute(
+            text(f"SELECT id FROM mova.buss_line bl WHERE bl.id = :id{scope_sql}"),
+            {"id": line_id, **scope_params},
+        )
+    ).first()
+    if not linha:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Linha não encontrada")
+
+    where = ["s.buss_line_id = :id", "s.status = 1"]
+    params: dict = {"id": line_id}
+
+    if weekday is not None:
+        where.append(":weekday = ANY(s.weekday)")
+        params["weekday"] = weekday
+    if direction is not None:
+        where.append("s.direction = :direction")
+        params["direction"] = direction
+
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT s.id, s.tag, s.buss_line_id, s.direction, s.status,
+                       s.hour, s.hour_end, s.cerca_id, s.cerca_id_end,
+                       s.weekday, s.route_id, s.driver_id, s.unit_id,
+                       s.circular, s.turn_trip, s.temporary,
+                       s.hour_work_initial, s.hour_work_final
+                FROM mova.buss_line_shift s
+                WHERE {' AND '.join(where)}
+                ORDER BY s.direction, s.hour
+                """
+            ),
+            params,
+        )
+    ).mappings().all()
+
+    return [ShiftResponse(**r, stops=[]) for r in rows]

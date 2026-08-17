@@ -5,7 +5,7 @@ Combines all endpoint routers.
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, vehicles, devices, tracked_unit_devices, vcms_unit_devices, drivers, reports, groups, subgroups, history_detailed, bus_lines, bus_lines
+from app.api.v1.endpoints import auth, vehicles, devices, tracked_unit_devices, vcms_unit_devices, drivers, reports, groups, subgroups, history_detailed, bus_lines, tracking, events
 from app.routers.admin import permissions_router, user_group_access_router
 
 api_router = APIRouter()
@@ -18,6 +18,8 @@ api_router.include_router(vehicles.router, prefix="/vehicles", tags=["Vehicles"]
 api_router.include_router(devices.router, prefix="/devices", tags=["Devices"])
 api_router.include_router(drivers.router, prefix="/drivers", tags=["Drivers"])
 api_router.include_router(bus_lines.router, prefix="/bus-lines", tags=["Bus Lines"])
+api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"])
+api_router.include_router(events.router, prefix="/events", tags=["Events"])
 api_router.include_router(tracked_unit_devices.router, prefix="/device-associations", tags=["Device Associations"])
 api_router.include_router(vcms_unit_devices.router, prefix="/video-device-associations", tags=["Video Device Associations"])
 api_router.include_router(reports.router, prefix="/reports")
