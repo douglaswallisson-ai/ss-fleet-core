@@ -1291,7 +1291,51 @@ async def list_telemetry_cursor(
             ct.max_rpm_permitted,
             ct.time_over_rpm,
             ct.time_stop_engine_on,
-            ct.count_stop_engine_on
+            ct.count_stop_engine_on,
+            -- Faixas de condução. Estavam no banco desde sempre e o schema não
+            -- as expunha; sem elas não há como avaliar condução por viagem.
+            ct.time_blue, ct.count_blue,
+            ct.time_green, ct.count_green,
+            ct.time_extra_eco, ct.count_extra_eco,
+            ct.time_yellow, ct.count_yellow,
+            ct.time_red, ct.count_red,
+            ct.time_inercia, ct.time_eco_roll, ct.time_retarder,
+            ct.time_autopilot, ct.time_banguela, ct.count_banguela,
+            ct.time_low_speed, ct.time_tolerancia,
+            ct.distance_pulling, ct.distance_simple_inertia,
+            ct.distance_retarder, ct.distance_ecoroll, ct.distance_autopilot,
+            -- Chuva: o equipamento distingue, e é o fator que mais distorce
+            -- comparação de consumo entre períodos.
+            ct.time_raining, ct.time_dry,
+            -- Velocidade separada por tipo de via e condição de pista.
+            ct.max_urban_permitted_speed, ct.max_road_permitted_speed,
+            ct.max_road_rain_speed, ct.urban_rain_speed,
+            ct.time_over_urban_speed, ct.time_over_road_speed,
+            ct.count_over_urban_speed, ct.count_over_road_speed,
+            ct.count_speed_violation_l2, ct.count_speed_violation_l3,
+            -- Linha e jornada, quando o equipamento envia.
+            ct.line, ct.line_number, ct.trip_direction,
+            ct.journey_status, ct.journey_opening_date,
+            -- Ponto e cerca de origem e destino, com a distância registrada.
+            ct.start_poi_id, ct.start_poi_distance, ct.start_area_id,
+            ct.end_poi_id, ct.end_poi_distance, ct.end_area_id,
+            -- Horímetro e combustível bruto: base do gatilho por horas da
+            -- manutenção preventiva e da conferência de abastecimento.
+            ct.start_hourmeter, ct.end_hourmeter,
+            ct.start_fuel, ct.end_fuel, ct.fuel_used_stopped,
+            -- Carga do motor e turbo.
+            ct.time_engine_load_level1, ct.time_engine_load_level2,
+            ct.time_engine_load_level3,
+            ct.time_over_turbo_pressure, ct.time_under_turbo_pressure,
+            ct.count_clutch, ct.count_cluth_excess, ct.time_cluth_excess,
+            ct.count_stop_accel, ct.time_stop_accel,
+            ct.time_stop_engine_on_productive, ct.time_engine_off,
+            ct.reached_rpm,
+            ct.time_over_urban_rain_speed, ct.time_over_road_rain_speed,
+            ct.count_over_urban_rain_speed, ct.count_over_road_rain_speed,
+            ct.reached_over_urban_speed, ct.reached_over_road_speed,
+            ct.reached_over_urban_rain_speed, ct.reached_over_road_rain_speed,
+            ct.trip_status, ct.trip_opening_date
         FROM mova.con_telemetry ct
         INNER JOIN mova.tracked_unit tu ON ct.unit_id = tu.id
         WHERE ct.start_time >= :start_date
