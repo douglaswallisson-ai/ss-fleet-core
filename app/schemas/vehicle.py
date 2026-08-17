@@ -101,6 +101,12 @@ class VehicleResponse(BaseModel):
         return self.obs
 
     model_config = {"from_attributes": True}
+    #: Custo por quilômetro cadastrado para o veículo. É insumo direto do CPK e
+    #: estava no banco sem nenhum endpoint expondo.
+    cost_km: Optional[float] = None
+    #: Ordem de serviço vinculada, quando o veículo está em manutenção.
+    os_num: Optional[str] = None
+    os_id: Optional[int] = None
 
 
 class VehicleCursorResponse(BaseModel):
