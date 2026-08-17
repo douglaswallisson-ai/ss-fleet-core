@@ -1,0 +1,58 @@
+# DS-1383 (épico DS-1342): normalização de terminação de linha (CRLF/LF).
+#
+# Regra geral: todo arquivo de texto é normalizado para LF no repositório
+# (independente do sistema operacional de quem commitou) e convertido para
+# o padrão do SO local no checkout. Isso elimina divergências de CRLF/LF
+# que fazem `git diff`/`git status` mostrarem centenas de arquivos como
+# "modificados" só por causa de quebra de linha.
+#
+# Referência: https://git-scm.com/docs/gitattributes
+
+# Padrão: deixar o Git decidir se é texto (heurística) e, se for,
+# normalizar para LF no repositório.
+* text=auto eol=lf
+
+# ----------------------------------------------------------------------
+# Código-fonte e configuração - texto, sempre LF (ambiente de produção é
+# Linux/Docker; ver DEPLOYMENT.md).
+# ----------------------------------------------------------------------
+*.py     text eol=lf
+*.pyi    text eol=lf
+*.sh     text eol=lf
+*.sql    text eol=lf
+*.json   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.toml   text eol=lf
+*.cfg    text eol=lf
+*.ini    text eol=lf
+*.env    text eol=lf
+*.env.*  text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+*.conf   text eol=lf
+Dockerfile text eol=lf
+
+# ----------------------------------------------------------------------
+# Scripts Windows (.bat/.cmd/.ps1), se algum dia existirem no repo, são a
+# exceção esperada: mantêm CRLF nativo do Windows.
+# ----------------------------------------------------------------------
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# ----------------------------------------------------------------------
+# Binários - nunca normalizar (evita corromper o arquivo).
+# ----------------------------------------------------------------------
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
+*.gz   binary
+*.pem  binary
+*.p12  binary
+*.woff binary
+*.woff2 binary

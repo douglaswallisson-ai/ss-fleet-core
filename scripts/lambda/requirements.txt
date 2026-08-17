@@ -1,0 +1,4 @@
+# Use versões compatíveis com Lambda Python 3.11
+paramiko==3.3.1
+cryptography==41.0.7
+boto3==1.34.19

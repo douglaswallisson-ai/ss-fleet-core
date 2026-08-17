@@ -1,0 +1,84 @@
+# Docker Compose v3.8 format (version field is now obsolete)
+# Port mapping format: "external_port:internal_port"
+#
+# ⚠️⚠️⚠️ CRITICAL PORT REQUIREMENT ⚠️⚠️⚠️
+# API MUST ALWAYS RUN ON PORT 8000 - DO NOT CHANGE
+# - External integrations depend on port 8000
+# - Firewall rules configured for port 8000
+# - Client documentation references port 8000
+# - After ANY deployment, validate with: bash .scripts/validate-port.sh
+#
+# External ports changed to avoid conflicts with system services:
+#   - Redis: 6380:6379 (system Redis may use 6379)
+#   - Prometheus: 9091:9090 (other monitoring may use 9090)
+#   - API: 8000:8000 (FIXED PORT - NEVER CHANGE)
+
+services:
+  # Redis (Cache)
+  redis:
+    image: redis:7-alpine
+    container_name: fleet_redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - fleet_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus (Metrics)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: fleet_prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - fleet_network
+
+  # FastAPI Application
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fleet_api
+    restart: unless-stopped
+    ports:
+      # ⚠️ CRITICAL: PORT 8000 IS FIXED - NEVER CHANGE THIS VALUE
+      # External integrations, firewall rules, and client docs depend on port 8000
+      # Validate after deployment: bash .scripts/validate-port.sh
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app
+      - ./alembic:/app/alembic
+      - ./tests:/app/tests
+    networks:
+      - fleet_network
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+networks:
+  fleet_network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  prometheus_data:
