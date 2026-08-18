@@ -75,4 +75,17 @@ class MeResponse(BaseModel):
     email: Optional[str] = None
     role: Optional[str] = None
 
+    #: 1 = administrador da plataforma, 0 = usuário comum.
+    #:
+    #: Sem este campo o front não tem como distinguir um administrador de um
+    #: operador: ele assumia o perfil mais restrito para todo mundo, e o
+    #: seletor de cliente — que só existe para administrador — nunca aparecia.
+    master: Optional[int] = None
+
+    #: Conta do usuário. O front precisa dela para saber qual empresa está
+    #: exibindo; sem isso a organização ativa fica indefinida e a interface
+    #: mostra um cliente de exemplo. Os grupos acessíveis vêm de
+    #: user_group_access, não do próprio usuário.
+    account_id: Optional[int] = None
+
     model_config = {"from_attributes": True}
