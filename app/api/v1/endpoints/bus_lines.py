@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.logging import get_logger
-from app.middleware.auth import get_current_user
+from app.middleware.auth import require_permission
 from app.models.user import User
 from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.bus_lines import (
@@ -48,7 +48,7 @@ async def list_bus_lines(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("reports", "read")),
 ):
     """
     Lista as linhas cadastradas.
@@ -105,7 +105,7 @@ async def list_bus_lines(
 async def get_bus_line(
     line_id: int,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("reports", "read")),
 ):
     """
     Detalhe da linha, com turnos e as paradas de cada turno.
@@ -189,7 +189,7 @@ async def get_trip_compliance(
     line_id: int,
     operation_date: date = Query(..., description="Data de operação (AAAA-MM-DD)"),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("reports", "read")),
 ):
     """
     Programado × realizado do dia.
@@ -305,7 +305,7 @@ async def list_shifts(
     weekday: Optional[int] = Query(None, ge=0, le=6, description="0 = domingo"),
     direction: Optional[int] = Query(None, ge=0, le=1, description="0 = ida, 1 = volta"),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("reports", "read")),
 ):
     """
     Turnos da linha — o que a operação chama de escala.

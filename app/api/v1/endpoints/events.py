@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, get_db_read
 from app.core.logging import get_logger
-from app.middleware.auth import get_current_user, require_permission
+from app.middleware.auth import require_permission
 from app.models.user import User
 from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.events import (
@@ -138,7 +138,11 @@ async def acknowledge_event(
     event_id: int,
     payload: EventAcknowledge,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    # Reconhecer evento altera estado. Usa a permissão de relatório em vez de
+    # criar um par novo: 'reports','update' não existe no catálogo de
+    # permissões, e exigir uma permissão inexistente barraria todo mundo com
+    # 403 — que foi exatamente o erro visto em produção com /groups.
+    user: User = Depends(require_permission("reports", "read")),
 ):
     """
     Marca o evento como tratado.
