@@ -25,6 +25,7 @@ from app.core.database import get_db
 from app.core.logging import get_logger
 from app.middleware.auth import get_current_user
 from app.models.user import User
+from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.bus_lines import (
     BusLineDetailResponse,
     BusLineListResponse,
@@ -37,31 +38,6 @@ from app.schemas.bus_lines import (
 
 logger = get_logger(__name__)
 router = APIRouter()
-
-
-async def _accessible_groups(db: AsyncSession, user: User) -> list[int]:
-    """
-    Grupos que o usuário enxerga.
-
-    Reaproveita o mesmo modelo dos outros recursos: usuário master vê tudo, os
-    demais só os grupos concedidos em `user_group_access`. Sem este filtro, um
-    operador de uma empresa leria as linhas de outra.
-    """
-    if user.master:
-        return []
-
-    result = await db.execute(
-        text("SELECT group_id FROM mova.user_group_access WHERE user_id = :uid"),
-        {"uid": user.id},
-    )
-    return [row[0] for row in result.fetchall()]
-
-
-def _group_filter(groups: list[int], alias: str = "bl") -> tuple[str, dict]:
-    """Cláusula de escopo. Lista vazia significa acesso irrestrito (master)."""
-    if not groups:
-        return "", {}
-    return f" AND {alias}.group_id = ANY(:groups)", {"groups": groups}
 
 
 @router.get("/", response_model=BusLineListResponse)
@@ -80,8 +56,8 @@ async def list_bus_lines(
     Traz a contagem de turnos junto porque linha sem turno não é operável — e
     essa é a primeira coisa que o gestor precisa enxergar ao abrir a lista.
     """
-    groups = await _accessible_groups(db, user)
-    scope_sql, scope_params = _group_filter(groups)
+    grupos, subgrupos = escopo_do_usuario(user)
+    scope_sql, scope_params = clausula_escopo(grupos, subgrupos, alias="bl")
 
     params: dict = {"limit": limit, "offset": offset, **scope_params}
     where = ["1=1"]
@@ -138,8 +114,8 @@ async def get_bus_line(
     inteiro para renderizar — pedir turno e depois parada por parada geraria
     dezenas de requisições para montar uma linha.
     """
-    groups = await _accessible_groups(db, user)
-    scope_sql, scope_params = _group_filter(groups)
+    grupos, subgrupos = escopo_do_usuario(user)
+    scope_sql, scope_params = clausula_escopo(grupos, subgrupos, alias="bl")
 
     line = (
         await db.execute(
@@ -228,8 +204,10 @@ async def get_trip_compliance(
     execução cujo horário já passou é **não realizada** — e é justamente esse
     caso que gera desconto em medição.
     """
-    groups = await _accessible_groups(db, user)
-    scope_sql, scope_params = _group_filter(groups, alias="sch")
+    grupos, subgrupos = escopo_do_usuario(user)
+    # O escopo é aplicado sobre a linha, não sobre o agendamento: `buss_line`
+    # é quem carrega grupo e subgrupo com certeza.
+    scope_sql, scope_params = clausula_escopo(grupos, subgrupos, alias="bl")
 
     sql = f"""
         SELECT
@@ -251,6 +229,7 @@ async def get_trip_compliance(
                 AS start_deviation_min
         FROM mova.busline_schedule sch
         JOIN mova.buss_line_shift s ON s.id = sch.bus_line_shift_id
+        JOIN mova.buss_line bl      ON bl.id = s.buss_line_id
         WHERE s.buss_line_id = :line_id
           AND sch.datetime_ini >= :day_start
           AND sch.datetime_ini <  :day_end
@@ -338,8 +317,8 @@ async def list_shifts(
     `weekday` é um array na tabela, então a comparação usa `ANY` — um turno
     pode valer para vários dias.
     """
-    groups = await _accessible_groups(db, user)
-    scope_sql, scope_params = _group_filter(groups)
+    grupos, subgrupos = escopo_do_usuario(user)
+    scope_sql, scope_params = clausula_escopo(grupos, subgrupos, alias="bl")
 
     # Confere o acesso pela linha antes de listar os turnos: sem isto, saber o
     # id de uma linha de outra empresa bastaria para ler a escala dela.

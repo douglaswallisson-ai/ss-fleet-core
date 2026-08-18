@@ -20,6 +20,7 @@ from app.core.database import get_db, get_db_read
 from app.core.logging import get_logger
 from app.middleware.auth import get_current_user, require_permission
 from app.models.user import User
+from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.events import (
     EventAcknowledge,
     EventListResponse,
@@ -73,7 +74,13 @@ async def list_events(
     if only_pending:
         where.append("e.acknowledged IS NOT TRUE")
 
-    clausula = " AND ".join(where)
+    # Escopo pelo veículo do evento. Sem isso, qualquer usuário autenticado
+    # leria os alarmes de todos os clientes.
+    grupos, subgrupos = escopo_do_usuario(current_user)
+    escopo_sql, escopo_params = clausula_escopo(grupos, subgrupos, alias="tu")
+    params.update(escopo_params)
+
+    clausula = " AND ".join(where) + escopo_sql
 
     rows = (
         await db.execute(
@@ -87,7 +94,7 @@ async def list_events(
                     tu.label2 AS vehicle_prefix,
                     COUNT(*) OVER () AS total_count
                 FROM mova.fleet_events e
-                LEFT JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
+                JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
                 WHERE {clausula}
                 ORDER BY e.timestamp DESC
                 LIMIT :limit OFFSET :offset
@@ -109,6 +116,7 @@ async def list_events(
                     COUNT(*) FILTER (WHERE e.acknowledged IS NOT TRUE)   AS pending,
                     COUNT(DISTINCT e.vehicle_id)                          AS vehicles
                 FROM mova.fleet_events e
+                JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
                 WHERE {clausula}
                 """
             ),

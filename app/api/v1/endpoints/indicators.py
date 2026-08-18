@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db_read
 from app.core.logging import get_logger
 from app.middleware.auth import require_permission
+from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.indicators import IndicatorPeriod, IndicatorsResponse
 
 logger = get_logger(__name__)
@@ -47,11 +48,16 @@ async def get_indicators(
     fim = datetime.combine(end_date, datetime.max.time())
     duracao = fim - inicio
 
-    atual = await _consolidar(db, inicio, fim, group_id)
+    # O filtro por grupo é opcional e vem da tela; o escopo do usuário é
+    # obrigatório e vem do token. Sem o segundo, qualquer autenticado veria o
+    # consolidado de todos os clientes.
+    grupos, subgrupos = escopo_do_usuario(current_user)
+
+    atual = await _consolidar(db, inicio, fim, group_id, grupos, subgrupos)
 
     anterior = None
     if compare_previous:
-        anterior = await _consolidar(db, inicio - duracao, inicio, group_id)
+        anterior = await _consolidar(db, inicio - duracao, inicio, group_id, grupos, subgrupos)
 
     logger.info(
         "indicators_calculated",
@@ -74,7 +80,12 @@ async def get_indicators(
 
 
 async def _consolidar(
-    db: AsyncSession, inicio: datetime, fim: datetime, group_id: Optional[int]
+    db: AsyncSession,
+    inicio: datetime,
+    fim: datetime,
+    group_id: Optional[int],
+    grupos: list[int],
+    subgrupos: list[int],
 ) -> IndicatorPeriod:
     """
     Agrega telemetria e falhas do intervalo.
@@ -84,7 +95,10 @@ async def _consolidar(
     reset de odômetro produziria saltos absurdos.
     """
     filtro_grupo = " AND tu.group_id = :group_id" if group_id else ""
-    params: dict = {"inicio": inicio, "fim": fim}
+    escopo_sql, escopo_params = clausula_escopo(grupos, subgrupos, alias="tu")
+    filtro_grupo += escopo_sql
+
+    params: dict = {"inicio": inicio, "fim": fim, **escopo_params}
     if group_id:
         params["group_id"] = group_id
 

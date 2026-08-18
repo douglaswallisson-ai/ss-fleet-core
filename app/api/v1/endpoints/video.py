@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db_read
 from app.core.logging import get_logger
 from app.middleware.auth import require_permission
+from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.video import (
     VideoDeviceResponse,
     VideoOccurrenceListResponse,
@@ -68,12 +69,15 @@ async def list_video_devices(
     rastreador é a melhor evidência disponível de que o carro está transmitindo.
     Isso é aproximação, e está declarado no campo `status_source`.
     """
+    grupos, subgrupos = escopo_do_usuario(current_user)
+    escopo_sql, escopo_params = clausula_escopo(grupos, subgrupos, alias="tu")
+
     limite = datetime.now() - timedelta(minutes=MINUTOS_OFFLINE)
 
     rows = (
         await db.execute(
             text(
-                """
+                f"""
                 SELECT
                     v.id, v.unit_id, v.device_id, v.association_date,
                     v.release_date, v.status,
@@ -97,10 +101,11 @@ async def list_video_devices(
                     LIMIT 1
                 ) ultima ON TRUE
                 WHERE v.status = 1
-                  AND v.release_date IS NULL
+                  AND v.release_date IS NULL{escopo_sql}
                 ORDER BY tu.label2 NULLS LAST, tu.label
                 """
-            )
+            ),
+            escopo_params,
         )
     ).mappings().all()
 
@@ -145,6 +150,8 @@ async def list_video_occurrences(
     if not end_date:
         end_date = datetime.now()
 
+    grupos_oc, subgrupos_oc = escopo_do_usuario(current_user)
+
     tipos = {
         "dms": TIPOS_DMS,
         "adas": TIPOS_ADAS,
@@ -167,7 +174,10 @@ async def list_video_occurrences(
     if only_pending:
         where.append("e.acknowledged IS NOT TRUE")
 
-    clausula = " AND ".join(where)
+    escopo_sql_oc, escopo_params_oc = clausula_escopo(grupos_oc, subgrupos_oc, alias="tu")
+    params.update(escopo_params_oc)
+
+    clausula = " AND ".join(where) + escopo_sql_oc
 
     rows = (
         await db.execute(
@@ -181,7 +191,7 @@ async def list_video_occurrences(
                     tu.label2 AS vehicle_prefix,
                     COUNT(*) OVER () AS total_count
                 FROM mova.fleet_events e
-                LEFT JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
+                JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
                 WHERE {clausula}
                 ORDER BY e.timestamp DESC
                 LIMIT :limit OFFSET :offset
@@ -203,6 +213,7 @@ async def list_video_occurrences(
                     COUNT(*) FILTER (WHERE e.event_type = ANY(:equip)) AS equipment,
                     COUNT(DISTINCT e.vehicle_id) AS vehicles
                 FROM mova.fleet_events e
+                JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
                 WHERE {clausula}
                 """
             ),

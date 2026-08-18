@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db_read
 from app.core.logging import get_logger
 from app.middleware.auth import require_permission
+from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.tracking import (
     TrackingEvent,
     TrackingResponse,
@@ -55,6 +56,20 @@ async def get_tracking(
     evento. Fazer isso no banco evita trafegar dezenas de milhares de posições
     só para descobrir meia dúzia de transições.
     """
+    # O escopo é conferido antes de ler posição: sem isto, saber o id de um
+    # veículo de outra empresa bastaria para reconstituir o dia dele.
+    grupos, subgrupos = escopo_do_usuario(current_user)
+    escopo_sql, escopo_params = clausula_escopo(grupos, subgrupos, alias="tu")
+
+    permitido = (
+        await db.execute(
+            text(f"SELECT 1 FROM mova.tracked_unit tu WHERE tu.id = :uid{escopo_sql}"),
+            {"uid": unit_id, **escopo_params},
+        )
+    ).first()
+    if not permitido:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Veículo não encontrado neste escopo")
+
     inicio = datetime.combine(operation_date, datetime.min.time())
     fim = inicio + timedelta(days=1)
 

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db_read
 from app.core.logging import get_logger
 from app.middleware.auth import require_permission
+from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.pois import PoiResponse, PoiVisitResponse
 
 logger = get_logger(__name__)
@@ -44,10 +45,15 @@ async def list_pois(
     Reúne origem e destino numa lista só: o mesmo ponto costuma aparecer nas
     duas pontas, e separá-los faria a contagem parecer metade do que é.
     """
+    # As viagens carregam o veículo, e é por ele que o escopo se aplica: sem
+    # isso a lista revelaria os pontos por onde a frota de outro cliente passa.
+    grupos, subgrupos = escopo_do_usuario(current_user)
+    escopo_sql, escopo_params = clausula_escopo(grupos, subgrupos, alias="tu")
+
     desde = datetime.now() - timedelta(days=days)
 
     filtro_nome = " AND nome ILIKE :search" if search else ""
-    params: dict = {"desde": desde}
+    params: dict = {"desde": desde, **escopo_params}
     if search:
         params["search"] = f"%{search}%"
 
@@ -56,22 +62,26 @@ async def list_pois(
             text(
                 f"""
                 WITH usos AS (
-                    SELECT start_poi_id AS poi_id, start_poi_name AS nome,
+                    SELECT t.start_poi_id AS poi_id, start_poi_name AS nome,
                            'poi' AS tipo, start_lat AS lat, start_lon AS lon
-                    FROM mova.con_telemetry
-                    WHERE start_time >= :desde AND start_poi_id IS NOT NULL
+                    FROM mova.con_telemetry t
+                    JOIN mova.tracked_unit tu ON tu.id = t.unit_id
+                    WHERE t.start_time >= :desde AND t.start_poi_id IS NOT NULL{escopo_sql}
                     UNION ALL
-                    SELECT end_poi_id, end_poi_name, 'poi', end_lat, end_lon
-                    FROM mova.con_telemetry
-                    WHERE start_time >= :desde AND end_poi_id IS NOT NULL
+                    SELECT t.end_poi_id, end_poi_name, 'poi', end_lat, end_lon
+                    FROM mova.con_telemetry t
+                    JOIN mova.tracked_unit tu ON tu.id = t.unit_id
+                    WHERE t.start_time >= :desde AND t.end_poi_id IS NOT NULL{escopo_sql}
                     UNION ALL
-                    SELECT start_area_id, start_area_name, 'area', start_lat, start_lon
-                    FROM mova.con_telemetry
-                    WHERE start_time >= :desde AND start_area_id IS NOT NULL
+                    SELECT t.start_area_id, start_area_name, 'area', start_lat, start_lon
+                    FROM mova.con_telemetry t
+                    JOIN mova.tracked_unit tu ON tu.id = t.unit_id
+                    WHERE t.start_time >= :desde AND t.start_area_id IS NOT NULL{escopo_sql}
                     UNION ALL
-                    SELECT end_area_id, end_area_name, 'area', end_lat, end_lon
-                    FROM mova.con_telemetry
-                    WHERE start_time >= :desde AND end_area_id IS NOT NULL
+                    SELECT t.end_area_id, end_area_name, 'area', end_lat, end_lon
+                    FROM mova.con_telemetry t
+                    JOIN mova.tracked_unit tu ON tu.id = t.unit_id
+                    WHERE t.start_time >= :desde AND t.end_area_id IS NOT NULL{escopo_sql}
                 )
                 SELECT
                     poi_id, nome, tipo,
