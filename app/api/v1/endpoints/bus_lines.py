@@ -247,8 +247,36 @@ async def get_trip_compliance(
         )
     ).mappings().all()
 
-    TOLERANCE_EARLY = -3
-    TOLERANCE_LATE = 5
+    # A tolerância vem do cadastro da unidade, não de constante no código.
+    #
+    # `subgroup.tolerance_before_ini` e `tolerance_after_ini` existem
+    # exatamente para isso, e variam por contrato: uma linha urbana com headway
+    # de 5 minutos não tolera o mesmo atraso que uma intermunicipal. Números
+    # fixos aqui contradiriam o que o poder concedente fiscaliza.
+    tolerancias = (
+        await db.execute(
+            text(
+                """
+                SELECT sg.tolerance_before_ini, sg.tolerance_after_ini
+                FROM mova.buss_line bl
+                JOIN mova.subgroup sg ON sg.id = bl.subgroup_id
+                WHERE bl.id = :line_id
+                """
+            ),
+            {"line_id": line_id},
+        )
+    ).mappings().first()
+
+    # Sem cadastro, cai para 3 e 5 minutos — que é a prática usual do setor, e
+    # o valor que estava embutido antes. Fica declarado na resposta para o
+    # gestor saber que aquele número não veio do contrato dele.
+    tolerancia_cadastrada = bool(
+        tolerancias
+        and (tolerancias["tolerance_before_ini"] is not None or tolerancias["tolerance_after_ini"] is not None)
+    )
+    TOLERANCE_EARLY = -abs(tolerancias["tolerance_before_ini"] or 3) if tolerancias else -3
+    TOLERANCE_LATE = abs(tolerancias["tolerance_after_ini"] or 5) if tolerancias else 5
+
     now = datetime.now()
 
     trips = []
@@ -296,6 +324,9 @@ async def get_trip_compliance(
         operation_date=operation_date,
         summary=summary,
         trips=trips,
+        tolerance_early_min=abs(TOLERANCE_EARLY),
+        tolerance_late_min=TOLERANCE_LATE,
+        tolerance_source="cadastro da unidade" if tolerancia_cadastrada else "padrão do setor",
     )
 
 

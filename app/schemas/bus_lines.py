@@ -143,3 +143,11 @@ class TripComplianceResponse(BaseModel):
     operation_date: date
     summary: TripComplianceSummary
     trips: list[TripComplianceItem]
+    #: Tolerâncias aplicadas, em minutos. Vão na resposta porque a
+    #: classificação depende delas: sem saber o limite, o gestor não tem como
+    #: contestar uma viagem marcada como atrasada.
+    tolerance_early_min: int
+    tolerance_late_min: int
+    #: De onde vieram — cadastro da unidade ou padrão do setor. Declarado para
+    #: o gestor saber se aquele número corresponde ao contrato dele.
+    tolerance_source: str
