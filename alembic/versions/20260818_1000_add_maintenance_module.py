@@ -31,43 +31,17 @@ def upgrade() -> None:
     # Catálogo do fabricante                                            #
     # ---------------------------------------------------------------- #
 
-    op.create_table(
-        "mnt_montadora",
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("nome", sa.String(80), nullable=False),
-        # Fabricante de chassi, de carroceria ou de veículo completo — um
-        # ônibus tem os dois, com planos de manutenção diferentes.
-        sa.Column("tipo", sa.String(20), nullable=False, server_default="chassi"),
-        sa.Column("ativo", sa.Boolean, nullable=False, server_default=sa.true()),
-        sa.Column("criado_em", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        schema=SCHEMA,
-    )
-    op.create_unique_constraint(
-        "uq_mnt_montadora_nome_tipo", "mnt_montadora", ["nome", "tipo"], schema=SCHEMA
-    )
-
-    op.create_table(
-        "mnt_modelo",
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("montadora_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.mnt_montadora.id"), nullable=False),
-        sa.Column("nome", sa.String(120), nullable=False),
-        sa.Column("motor", sa.String(60)),
-        sa.Column("propulsao", sa.String(20), server_default="diesel"),
-        sa.Column("ano_inicio", sa.Integer),
-        sa.Column("ano_fim", sa.Integer),
-        # Modelo criado automaticamente ao cadastrar veículo cujo modelo não
-        # existia. Fica marcado para o administrador completar os parâmetros —
-        # sem isso, o veículo roda sem plano de manutenção e ninguém percebe.
-        sa.Column("pendente_configuracao", sa.Boolean, nullable=False, server_default=sa.false()),
-        sa.Column("criado_em", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        schema=SCHEMA,
-    )
-    op.create_index("ix_mnt_modelo_montadora", "mnt_modelo", ["montadora_id"], schema=SCHEMA)
+    # `mnt_montadora` e `mnt_modelo` foram descartados: `mova.vehicle_manufacturer`
+    # e `mova.vehicle_model` já existem, com 52 fabricantes e 576 modelos em uso.
+    # Criar um catálogo paralelo faria o parâmetro de manutenção apontar para um
+    # modelo diferente do que o veículo referencia, e ninguém notaria até os
+    # números não baterem.
 
     op.create_table(
         "mnt_parametro",
         sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("modelo_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.mnt_modelo.id"), nullable=False),
+        # Referencia o catálogo existente, não um modelo próprio.
+        sa.Column("vehicle_model_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.vehicle_model.id"), nullable=False),
         sa.Column("sistema", sa.String(60), nullable=False),
         sa.Column("item", sa.String(160), nullable=False),
         sa.Column("acao", sa.String(40), nullable=False),
@@ -88,12 +62,12 @@ def upgrade() -> None:
         sa.Column("criado_em", sa.DateTime(timezone=True), server_default=sa.func.now()),
         schema=SCHEMA,
     )
-    op.create_index("ix_mnt_parametro_modelo", "mnt_parametro", ["modelo_id"], schema=SCHEMA)
+    op.create_index("ix_mnt_parametro_modelo", "mnt_parametro", ["vehicle_model_id"], schema=SCHEMA)
 
     op.create_table(
         "mnt_regra_ajuste",
         sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("montadora_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.mnt_montadora.id")),
+        sa.Column("manufacturer_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.vehicle_manufacturer.id")),
         sa.Column("nome", sa.String(120), nullable=False),
         # Sinal de telemetria observado, ex.: parado_motor_ligado.
         sa.Column("indicador", sa.String(60), nullable=False),
@@ -110,13 +84,9 @@ def upgrade() -> None:
     # Vínculo do veículo com o catálogo                                 #
     # ---------------------------------------------------------------- #
 
-    op.create_table(
-        "mnt_veiculo_modelo",
-        sa.Column("unit_id", sa.Integer, primary_key=True),
-        sa.Column("modelo_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.mnt_modelo.id"), nullable=False),
-        sa.Column("atualizado_em", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        schema=SCHEMA,
-    )
+    # `mnt_veiculo_modelo` descartada: `mova.tracked_unit` já tem
+    # `vehicle_model_id`. Um segundo vínculo permitiria que o veículo apontasse
+    # para um modelo no cadastro e outro na manutenção.
 
     # ---------------------------------------------------------------- #
     # Execução: o que já foi feito                                      #
@@ -151,6 +121,9 @@ def upgrade() -> None:
     # Ordens de serviço                                                 #
     # ---------------------------------------------------------------- #
 
+    # Não confundir com `mova.device_maintenance`, que registra manutenção do
+    # *rastreador* — se o GPS, o GSM e o CAN do equipamento estão funcionando.
+    # Esta é a ordem de serviço do veículo, que não existe no banco.
     op.create_table(
         "mnt_ordem_servico",
         sa.Column("id", sa.Integer, primary_key=True),
@@ -274,10 +247,7 @@ def downgrade() -> None:
         "mnt_ordem_item",
         "mnt_ordem_servico",
         "mnt_execucao",
-        "mnt_veiculo_modelo",
         "mnt_regra_ajuste",
         "mnt_parametro",
-        "mnt_modelo",
-        "mnt_montadora",
     ):
         op.drop_table(tabela, schema=SCHEMA)

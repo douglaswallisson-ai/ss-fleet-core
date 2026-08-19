@@ -24,62 +24,24 @@ def upgrade() -> None:
     # Contratos comerciais                                              #
     # ---------------------------------------------------------------- #
 
-    op.create_table(
-        "ctr_contrato",
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("numero", sa.String(40), nullable=False, unique=True),
-        # Conta liberada por este contrato. Nulo enquanto o contrato está em
-        # rascunho — é o que impede organização criada para teste ficar ligada.
-        sa.Column("account_id", sa.Integer),
-        sa.Column("razao_social", sa.String(200), nullable=False),
-        sa.Column("nome_fantasia", sa.String(160)),
-        sa.Column("cnpj", sa.String(20), nullable=False),
-        sa.Column("telefone", sa.String(30)),
-        sa.Column("email", sa.String(160)),
-        # Responsável e financeiro separados de propósito: quem opera não é
-        # quem paga, e a cobrança precisa chegar no lugar certo.
-        sa.Column("responsavel_nome", sa.String(160)),
-        sa.Column("responsavel_cargo", sa.String(80)),
-        sa.Column("responsavel_telefone", sa.String(30)),
-        sa.Column("responsavel_email", sa.String(160)),
-        sa.Column("financeiro_nome", sa.String(160)),
-        sa.Column("financeiro_email", sa.String(160)),
-        sa.Column("financeiro_telefone", sa.String(30)),
-        sa.Column("ativacao", sa.Date, nullable=False),
-        sa.Column("termino", sa.Date, nullable=False),
-        # Término após aditivos de prorrogação. Nulo significa que vale o
-        # original — guardar os dois preserva o histórico do que foi acordado.
-        sa.Column("termino_vigente", sa.Date),
-        sa.Column("status", sa.String(20), nullable=False, server_default="rascunho"),
-        sa.Column("cancelado_em", sa.DateTime(timezone=True)),
-        sa.Column("motivo_cancelamento", sa.Text),
-        sa.Column("observacoes", sa.Text),
-        sa.Column("criado_em", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        sa.Column("criado_por", sa.Integer),
-        schema=SCHEMA,
-    )
-    op.create_index("ix_ctr_contrato_account", "ctr_contrato", ["account_id"], schema=SCHEMA)
-    op.create_index("ix_ctr_contrato_status", "ctr_contrato", ["status"], schema=SCHEMA)
-
-    op.create_table(
-        "ctr_contrato_modalidade",
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("contrato_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.ctr_contrato.id", ondelete="CASCADE"), nullable=False),
-        # Uma empresa pode operar urbano e fretamento na mesma frota, e a
-        # divisão define faturamento e escopo de módulos. Por isso é tabela
-        # própria, e não uma coluna com o total.
-        sa.Column("modalidade", sa.String(20), nullable=False),
-        sa.Column("veiculos", sa.Integer, nullable=False, server_default="0"),
-        schema=SCHEMA,
-    )
-    op.create_unique_constraint(
-        "uq_ctr_modalidade", "ctr_contrato_modalidade", ["contrato_id", "modalidade"], schema=SCHEMA
-    )
+    # `ctr_contrato`, `ctr_contrato_modalidade` e `ctr_contrato_usuario` foram
+    # descartadas.
+    #
+    # `mova.contract` já existe, com 103 contratos em seis grupos, e é mais
+    # completa do que a minha proposta em pontos que importam: índice de
+    # reajuste, primeira cobrança, tipo de contrato, segmento e hierarquia por
+    # `parent`.
+    #
+    # Criar uma tabela paralela levaria a contratos cadastrados em dois lugares,
+    # divergindo — e ninguém perceberia até a cobrança sair errada.
+    #
+    # Do que eu havia proposto, só o aditivo não existe. É o que fica.
 
     op.create_table(
         "ctr_aditivo",
         sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("contrato_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.ctr_contrato.id", ondelete="CASCADE"), nullable=False),
+        # Aponta para o contrato existente, não para um cadastro próprio.
+        sa.Column("contract_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.contract.id", ondelete="CASCADE"), nullable=False),
         sa.Column("numero", sa.String(40), nullable=False),
         sa.Column("tipo", sa.String(20), nullable=False),
         sa.Column("assinado_em", sa.Date, nullable=False),
@@ -87,20 +49,6 @@ def upgrade() -> None:
         sa.Column("descricao", sa.Text),
         sa.Column("registrado_por", sa.Integer),
         sa.Column("criado_em", sa.DateTime(timezone=True), server_default=sa.func.now()),
-        schema=SCHEMA,
-    )
-
-    op.create_table(
-        "ctr_contrato_usuario",
-        sa.Column("id", sa.Integer, primary_key=True),
-        sa.Column("contrato_id", sa.Integer, sa.ForeignKey(f"{SCHEMA}.ctr_contrato.id", ondelete="CASCADE"), nullable=False),
-        # Referencia mova.users quando o usuário já existe; nome e e-mail
-        # guardados para o caso de o vínculo ser criado antes do usuário.
-        sa.Column("user_id", sa.Integer),
-        sa.Column("nome", sa.String(160), nullable=False),
-        sa.Column("email", sa.String(160), nullable=False),
-        sa.Column("perfil", sa.String(30), nullable=False, server_default="consulta"),
-        sa.Column("ativo", sa.Boolean, nullable=False, server_default=sa.true()),
         schema=SCHEMA,
     )
 
@@ -119,6 +67,13 @@ def upgrade() -> None:
         schema=SCHEMA,
     )
 
+    # Complementa `mova.driver_scoring`, que já pontua cada viagem com peso por
+    # indicador — inclusive excesso de velocidade sob chuva, separado do seco.
+    #
+    # O que falta lá é o **esperado**: a nota é absoluta, sem comparação contra
+    # o padrão da linha e da faixa horária. É justamente o que torna a avaliação
+    # justa entre um motorista de corredor e um de bairro, e é o que estas duas
+    # tabelas trazem.
     op.create_table(
         "pdr_padrao_linha",
         sa.Column("id", sa.Integer, primary_key=True),
@@ -183,9 +138,6 @@ def downgrade() -> None:
         "inf_multa",
         "pdr_padrao_linha",
         "pdr_faixa_horaria",
-        "ctr_contrato_usuario",
         "ctr_aditivo",
-        "ctr_contrato_modalidade",
-        "ctr_contrato",
     ):
         op.drop_table(tabela, schema=SCHEMA)
