@@ -73,6 +73,10 @@ def clausula_escopo(
 
     return (
         f" AND {alias}.{coluna_grupo} = ANY(:escopo_grupos)"
-        f" AND (:escopo_subgrupos IS NULL OR {alias}.{coluna_subgrupo} = ANY(:escopo_subgrupos))",
+        f" AND ("
+        f"    :escopo_subgrupos IS NULL"
+        f"    OR {alias}.{coluna_subgrupo} = ANY(:escopo_subgrupos)"
+        f"    OR (0 = ANY(:escopo_subgrupos) AND {alias}.{coluna_subgrupo} IS NULL)"
+        f")",
         {"escopo_grupos": grupos, "escopo_subgrupos": subgrupos},
     )
