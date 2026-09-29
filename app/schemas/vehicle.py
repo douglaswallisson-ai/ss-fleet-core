@@ -51,6 +51,44 @@ class VehicleUpdate(BaseModel):
     subgroup_id: Optional[int] = Field(None, description="Subgroup ID (user must have access)")
 
 
+class EstadoAtual(BaseModel):
+    """
+    Última leitura do equipamento, de ``mova.dev_status``.
+
+    Separado do cadastro de propósito: ``tracked_unit.initial_odometer`` é o
+    valor de quando o equipamento foi instalado — está preenchido em poucos
+    veículos e não avança. Quem precisa saber a quilometragem de hoje precisa
+    desta tabela.
+
+    ``odom_quality_flag`` vem junto e não é detalhe: um terço dos veículos
+    ativos tem odômetro corrigido por alguma regra — ``regressive_replaced``
+    quando o contador de 32 bits estoura e a leitura anda para trás,
+    ``outlier_replaced`` em salto implausível. Entregar o valor sem a marca
+    faz o consumidor tratar número tratado como leitura direta, e reimplementar
+    a mesma trava por conta própria.
+    """
+
+    #: Odômetro em **metros**, como a tabela guarda.
+    odom: Optional[int] = None
+    odom_total: Optional[int] = None
+    #: `ok`, `regressive_replaced`, `outlier_replaced`, `frozen_business_rule`,
+    #: `odom_is_zero_replaced_by_last_canonical`, `magic_value_replaced`,
+    #: `null_replaced`, ou nulo quando nenhuma regra foi aplicada.
+    odom_quality_flag: Optional[str] = None
+    #: Horímetro acumulado.
+    hourmeter_total: Optional[float] = None
+    #: Consumo médio que o próprio veículo informa pelo barramento. Serve de
+    #: contraprova ao km/l calculado da telemetria.
+    can_avg_fuel_economy_kmpl: Optional[float] = None
+    can_total_odometer: Optional[int] = None
+    can_engine_hourmeter: Optional[float] = None
+    #: Quando esta leitura chegou. Sem ela, não há como saber se o odômetro é
+    #: de hoje ou de três meses atrás.
+    local_time: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
 class VehicleResponse(BaseModel):
     """Schema for vehicle response - includes all relevant fields."""
     id: int
@@ -107,6 +145,43 @@ class VehicleResponse(BaseModel):
     #: Ordem de serviço vinculada, quando o veículo está em manutenção.
     os_num: Optional[str] = None
     os_id: Optional[int] = None
+
+    # ------------------------------------------------------------------ #
+    # Estado atual, de `mova.dev_status`                                   #
+    # ------------------------------------------------------------------ #
+    #
+    # `initial_odometer` acima é o valor de quando o equipamento foi
+    # instalado, e está preenchido em poucos veículos. Quem precisa da
+    # quilometragem de hoje — manutenção preventiva, custo por km — precisa
+    # destes campos.
+
+    #: Odômetro atual, em metros.
+    odom: Optional[int] = None
+
+    #: Como a leitura foi tratada antes de virar `odom`.
+    #:
+    #: Um terço da frota tem o valor corrigido por alguma regra:
+    #: `regressive_replaced` é estouro de contador de 32 bits,
+    #: `outlier_replaced` é salto implausível, `magic_value_replaced` é
+    #: valor sentinela do equipamento. Quem consome `odom` sem olhar esta
+    #: flag está lendo valor tratado como se fosse leitura direta.
+    odom_quality_flag: Optional[str] = None
+
+    #: Horímetro acumulado, em horas. É o gatilho por horas da preventiva.
+    hourmeter_total: Optional[float] = None
+
+    #: Consumo médio informado pelo próprio veículo, quando o barramento
+    #: publica. Não substitui o cálculo por viagem — é outra medição, feita
+    #: pela central do veículo, e as duas podem divergir.
+    can_avg_fuel_economy_kmpl: Optional[float] = None
+
+    #: Instante da última leitura. Sem ele não há como saber se o odômetro
+    #: é de hoje ou de três meses atrás.
+    dev_status_time: Optional[datetime] = None
+    #: Ano de fabricação. Existe no cadastro e não era exposto.
+    vehicle_year: Optional[int] = None
+    #: Última leitura do equipamento. Nulo quando o veículo nunca transmitiu.
+    estado_atual: Optional[EstadoAtual] = None
 
 
 class VehicleCursorResponse(BaseModel):

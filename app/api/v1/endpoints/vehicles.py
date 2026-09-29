@@ -7,7 +7,7 @@ from typing import List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, text, func
 
 from app.core.database import get_db, get_db_read
 from app.core.access_control import build_group_subgroup_filter
@@ -153,10 +153,45 @@ async def list_vehicles(
     if has_more:
         rows = rows[:limit]
 
+    # Estado atual, numa consulta só para a página inteira.
+    #
+    # `dev_status` guarda a última leitura de cada equipamento — é ali que está
+    # o odômetro de hoje. `tracked_unit.initial_odometer` é o valor de quando o
+    # equipamento foi instalado: está preenchido em poucos veículos e não
+    # avança, então calcular manutenção sobre ele usa quilometragem de meses
+    # atrás e nada vence nunca.
+    #
+    # Uma consulta por página e não uma por veículo: com 1.000 por página,
+    # buscar individualmente seriam mil idas ao banco para montar uma lista.
+    estados: dict[int, dict] = {}
+    if rows:
+        ids = [r["id"] for r in rows]
+        estados = {
+            e["unit_id"]: dict(e)
+            for e in (
+                await db.execute(
+                    text(
+                        """
+                        SELECT unit_id, odom, odom_total, odom_quality_flag,
+                               hourmeter_total, can_avg_fuel_economy_kmpl,
+                               can_total_odometer, can_engine_hourmeter,
+                               local_time
+                        FROM mova.dev_status
+                        WHERE unit_id = ANY(:ids)
+                        """
+                    ),
+                    {"ids": ids},
+                )
+            ).mappings()
+        }
+
     def _build_response(row):
         data = dict(row)
         for col_key in _RISKY_DATETIME_COLUMNS:
             data[col_key] = _parse_safe_datetime(data[col_key])
+        # Nulo quando o veículo nunca transmitiu — diferente de odômetro zero,
+        # que seria uma leitura afirmando que o veículo não rodou.
+        data["estado_atual"] = estados.get(data["id"])
         return data
 
     data = [_build_response(row) for row in rows]
