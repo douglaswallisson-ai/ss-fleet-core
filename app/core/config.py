@@ -34,6 +34,16 @@ class Settings(BaseSettings):
         default=None,
         description="PostgreSQL read replica URL (Read-Only). If not set, falls back to DATABASE_URL"
     )
+    #: Caminho de busca de schema aplicado na conexão.
+    #:
+    #: Necessário para usuários cujo ``search_path`` não inclui ``mova``: os
+    #: modelos de permissão referenciam a tabela pelo nome simples, e sem o
+    #: caminho a consulta falha logo após a autenticação.
+    DATABASE_SEARCH_PATH: Optional[str] = Field(
+        default=None,
+        description="search_path aplicado na conexão, ex.: public,audit,mova",
+    )
+
     DATABASE_POOL_SIZE: int = Field(default=10, description="Database connection pool size")
     DATABASE_MAX_OVERFLOW: int = Field(default=20, description="Maximum overflow connections")
     DATABASE_REPLICA_POOL_SIZE: int = Field(default=15, description="Read replica connection pool size")

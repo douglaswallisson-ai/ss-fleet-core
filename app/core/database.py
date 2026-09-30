@@ -42,6 +42,28 @@ sync_engine = create_engine(
     poolclass=QueuePool,
 )
 
+def _connect_args() -> dict:
+    """
+    Argumentos de conexão do driver assíncrono.
+
+    Alguns modelos declaram ``{'schema': 'mova'}`` e outros não — os de
+    permissão (``api_permissions``, ``api_user_permissions``) usam o nome
+    simples. Em produção isso funciona porque o usuário do banco tem
+    ``search_path`` apontando para ``mova``; um usuário sem essa configuração
+    recebe ``relation "api_permissions" does not exist`` logo após autenticar.
+
+    Definir o caminho na conexão resolve sem depender de como cada usuário foi
+    criado, e sem alterar os modelos — mexer neles mudaria o comportamento de
+    quem já funciona.
+
+    A ordem segue a do usuário ``suporte``: ``public, audit, mova``.
+    """
+    caminho = getattr(settings, "DATABASE_SEARCH_PATH", None)
+    if not caminho:
+        return {}
+    return {"server_settings": {"search_path": caminho}}
+
+
 # Asynchronous engine for Master (INSERT, UPDATE, DELETE)
 async_engine = create_async_engine(
     settings.database_url_async,
@@ -55,6 +77,7 @@ async_engine = create_async_engine(
     # tuning (pool_size, max_overflow) - é o que create_async_engine já
     # escolhe por padrão quando poolclass não é especificado.
     poolclass=AsyncAdaptedQueuePool,
+    connect_args=_connect_args(),
 )
 
 # ========================================
@@ -70,6 +93,7 @@ async_engine_replica = create_async_engine(
     echo=settings.DEBUG,
     # DS-1380: mesmo motivo do async_engine acima.
     poolclass=AsyncAdaptedQueuePool,
+    connect_args=_connect_args(),
 )
 
 # Log which databases are configured
