@@ -33,14 +33,47 @@ Base = declarative_base()
 # ========================================
 
 # Synchronous engine (for Alembic migrations and sync operations)
-sync_engine = create_engine(
-    settings.database_url_sync,
-    pool_pre_ping=True,  # Verify connections before using
-    pool_size=settings.DATABASE_POOL_SIZE,
-    max_overflow=settings.DATABASE_MAX_OVERFLOW,
-    echo=settings.DEBUG,  # Log SQL queries in debug mode
-    poolclass=QueuePool,
-)
+#
+# Criado sob demanda, não na importação.
+#
+# Ele existe para as migrations e usa `psycopg2`, que carrega uma biblioteca
+# nativa. A aplicação em si é assíncrona e fala com o banco por `asyncpg` —
+# nunca precisa deste motor.
+#
+# Instanciar na importação obriga a carregar `psycopg2` para **subir a API**, e
+# num ambiente com controle de aplicativo a biblioteca nativa é bloqueada: o
+# processo nem inicia, por uma dependência que não seria usada.
+_sync_engine = None
+
+
+def get_sync_engine():
+    """Motor síncrono, instanciado na primeira chamada."""
+    global _sync_engine
+    if _sync_engine is None:
+        _sync_engine = create_engine(
+            settings.database_url_sync,
+            pool_pre_ping=True,
+            pool_size=settings.DATABASE_POOL_SIZE,
+            max_overflow=settings.DATABASE_MAX_OVERFLOW,
+            echo=settings.DEBUG,
+            poolclass=QueuePool,
+        )
+    return _sync_engine
+
+
+class _SyncEngineProxy:
+    """
+    Mantém ``sync_engine`` utilizável como antes.
+
+    Quem já importava o objeto continua funcionando; a diferença é que a
+    conexão só é criada quando algum atributo é acessado de fato.
+    """
+
+    def __getattr__(self, nome):
+        return getattr(get_sync_engine(), nome)
+
+
+sync_engine = _SyncEngineProxy()
 
 def _connect_args() -> dict:
     """
@@ -113,6 +146,8 @@ else:
 # Session Factories
 # ========================================
 
+# O sessionmaker aceita o proxy: ele só resolve o motor quando uma sessão é
+# de fato aberta, o que nas migrations acontece e na API não.
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
