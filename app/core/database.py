@@ -58,6 +58,9 @@ def get_sync_engine():
             echo=settings.DEBUG,
             poolclass=QueuePool,
         )
+        # Monitoramento de consulta lenta, ligado junto com o motor.
+        event.listen(_sync_engine, "before_cursor_execute", before_cursor_execute)
+        event.listen(_sync_engine, "after_cursor_execute", after_cursor_execute)
     return _sync_engine
 
 
@@ -175,13 +178,16 @@ AsyncSessionLocalReplica = async_sessionmaker(
 
 
 # Database query monitoring
-@event.listens_for(sync_engine, "before_cursor_execute")
+#
+# Registrados dentro de `get_sync_engine`, não no nível do módulo: decorar com
+# `event.listens_for(sync_engine, ...)` aqui resolveria o proxy na importação e
+# criaria o motor — exatamente o que se evita, já que ele carrega `psycopg2` e
+# a API não precisa dele para subir.
 def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
     """Record query start time for monitoring."""
     conn.info.setdefault("query_start_time", []).append(time.time())
 
 
-@event.listens_for(sync_engine, "after_cursor_execute")
 def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
     """Log slow queries for performance monitoring."""
     total_time = time.time() - conn.info["query_start_time"].pop()
