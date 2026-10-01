@@ -35,6 +35,16 @@ class EventosPorHora(BaseModel):
     embreagem: Optional[float] = None
 
 
+class EventosQtd(BaseModel):
+    """Quantidades no período (Power BI, Análise de Condução QTD)."""
+
+    aceleracao_brusca: int = 0
+    freada_brusca: int = 0
+    velocidade_excessiva: int = 0
+    velocidade_chuva: int = 0
+    embreagem: int = 0
+
+
 class MotoristaRanking(BaseModel):
     posicao: Optional[int] = None
     driver_id: int
@@ -52,6 +62,7 @@ class MotoristaRanking(BaseModel):
     estrelas: int
     faixas: FaixasMotorista
     eventos_por_hora: EventosPorHora
+    eventos: EventosQtd = EventosQtd()
     #: Sem linha de faixa no período: a nota não sai, em vez de sair zero.
     sem_faixas: bool
 

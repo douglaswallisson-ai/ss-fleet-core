@@ -33,6 +33,7 @@ from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.middleware.auth import require_permission
 from app.schemas.driver_ranking import (
     EventosPorHora,
+    EventosQtd,
     FaixasMotorista,
     MotoristaRanking,
     RankingMotoristasResponse,
@@ -84,6 +85,7 @@ async def ranking_motoristas(
     end_date: Optional[date] = Query(None, description="Inclusivo. Padrão: ontem"),
     group_id: Optional[int] = Query(None, description="Restringe a uma empresa, dentro do escopo"),
     unit_id: Optional[int] = Query(None, description="Restringe a um veículo"),
+    subgroup_id: Optional[int] = Query(None, description="Restringe a uma garagem"),
     por: str = Query(
         "motorista",
         pattern="^(motorista|veiculo)$",
@@ -115,6 +117,9 @@ async def ranking_motoristas(
         if group_id is not None:
             sql += f" AND {alias}.group_id = :group_id"
             params = {**params, "group_id": group_id}
+        if subgroup_id is not None:
+            sql += f" AND {alias}.subgroup_id = :subgroup_id"
+            params = {**params, "subgroup_id": subgroup_id}
         if unit_id is not None:
             sql += f" AND {alias}.unit_id = :unit_id"
             params = {**params, "unit_id": unit_id}
@@ -143,7 +148,9 @@ async def ranking_motoristas(
                        SUM(COALESCE(h.count_clutch_excess, 0)) AS embreagem,
                        SUM(COALESCE(h.count_speed_excess, 0) + COALESCE(h.count_speed_excess_dry_l1, 0)
                          + COALESCE(h.count_speed_excess_dry_l2, 0) + COALESCE(h.count_speed_excess_dry_l3, 0))
-                           AS velocidade
+                           AS velocidade,
+                       SUM(COALESCE(h.count_speed_excess_wet_l1, 0) + COALESCE(h.count_speed_excess_wet_l2, 0)
+                         + COALESCE(h.count_speed_excess_wet_l3, 0)) AS velocidade_chuva
                 FROM mova.con_driver_h_km h
                 WHERE h.dt >= :ini AND h.dt <= :fim {esc_h}
                 GROUP BY 1
@@ -299,6 +306,13 @@ async def ranking_motoristas(
                     freada_brusca=round(por_hora(h["freada"]), 2),
                     velocidade_excessiva=round(por_hora(h["velocidade"]), 2),
                     embreagem=round(por_hora(h["embreagem"]), 2),
+                ),
+                eventos=EventosQtd(
+                    aceleracao_brusca=int(h["acel"] or 0),
+                    freada_brusca=int(h["freada"] or 0),
+                    velocidade_excessiva=int(h["velocidade"] or 0),
+                    velocidade_chuva=int(h["velocidade_chuva"] or 0),
+                    embreagem=int(h["embreagem"] or 0),
                 ),
                 sem_faixas=fx <= 0,
             )
