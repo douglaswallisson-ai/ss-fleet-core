@@ -191,6 +191,33 @@ async def list_vehicles(
             ).mappings()
         }
 
+    # Equipamento principal de cada veículo, para a tela de telemetria saber
+    # qual aparelho está em qual placa. O vínculo é `tracked_unit_device`
+    # (status 1); `device.asset` não serve — os aparelhos ficam cadastrados no
+    # grupo da SS, não no do cliente.
+    equipamentos: dict[int, dict] = {}
+    if rows:
+        equipamentos = {
+            e["unit_id"]: dict(e)
+            for e in (
+                await db.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (tud.tracked_unit_id)
+                               tud.tracked_unit_id AS unit_id, d.id AS device_id, d.identifier,
+                               d.operadora, d.iccid, dm.name AS modelo
+                        FROM mova.tracked_unit_device tud
+                        JOIN mova.device d ON d.id = tud.device_id
+                        LEFT JOIN mova.device_model dm ON dm.id = d.device_model_id
+                        WHERE tud.tracked_unit_id = ANY(:ids) AND tud.status = 1
+                        ORDER BY tud.tracked_unit_id, tud.device_primary DESC NULLS LAST
+                        """
+                    ),
+                    {"ids": [r["id"] for r in rows]},
+                )
+            ).mappings()
+        }
+
     def _build_response(row):
         data = dict(row)
         for col_key in _RISKY_DATETIME_COLUMNS:
@@ -198,6 +225,7 @@ async def list_vehicles(
         # Nulo quando o veículo nunca transmitiu — diferente de odômetro zero,
         # que seria uma leitura afirmando que o veículo não rodou.
         data["estado_atual"] = estados.get(data["id"])
+        data["equipamento"] = equipamentos.get(data["id"])
         return data
 
     data = [_build_response(row) for row in rows]

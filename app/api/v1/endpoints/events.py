@@ -139,6 +139,91 @@ async def list_events(
     )
 
 
+@router.get("/alarmes")
+async def listar_alarmes(
+    horas: int = Query(24, ge=1, le=720, description="Janela, em horas. Padrão: 24."),
+    group_id: Optional[int] = Query(None),
+    so_nao_visualizados: bool = Query(False),
+    limit: int = Query(500, ge=1, le=2000),
+    db: AsyncSession = Depends(get_db_read),
+    current_user=Depends(require_permission("reports", "read")),
+):
+    """
+    Disparos do Monitor de Alarmes (`alarm_violation`), mais recentes primeiro.
+
+    Mesmos filtros do `listViolationAction` do plataforma_web (disparo aberto,
+    alarme ativo e exibido no monitor, unidade ativa, grupo/subgrupo do acesso,
+    mesma conta), com uma diferença deliberada: **ordena por data**. Lá o
+    `ORDER BY` está comentado e o monitor pega 200 disparos quaisquer (vault:
+    Alarmes, seção 5).
+    """
+    filtro_grupo = " AND al.group_id = :group_id" if group_id is not None else ""
+    filtro_visto = " AND COALESCE(av.user_view, 0) = 0" if so_nao_visualizados else ""
+    params = {"user_id": current_user.user_id, "horas": horas, "limit": limit}
+    if group_id is not None:
+        params["group_id"] = group_id
+
+    linhas = (
+        await db.execute(
+            text(
+                f"""
+                SELECT av.id, al.name AS alarme, al.level AS nivel, av.initial_time, av.final_time,
+                       tu.id AS unit_id, tu.label AS placa, tu.label2 AS prefixo,
+                       NULLIF(TRIM(av.driver_name), '') AS motorista, av.speed AS velocidade,
+                       NULLIF(TRIM(av.address), '') AS endereco, av.lat, av.lon,
+                       COALESCE(av.user_view, 0) AS visualizado, av.obs_modified AS observacao,
+                       COUNT(*) OVER () AS total
+                FROM mova.alarm_violation av
+                JOIN mova.alarm al ON av.alarm_id = al.id AND al.status = 1
+                JOIN mova.tracked_unit tu ON av.unit_id = tu.id AND tu.status = 1
+                WHERE av.status = 1
+                  AND al.notif_monitor
+                  AND av.initial_time >= (now() AT TIME ZONE 'America/Sao_Paulo') - make_interval(hours => :horas)
+                  AND al.group_id IN (SELECT group_id FROM mova.user_group_access WHERE user_id = :user_id)
+                  AND (
+                      al.subgroup_id IN (SELECT subgroup_id FROM mova.user_group_access WHERE user_id = :user_id)
+                      OR al.subgroup_id IS NULL OR al.subgroup_id = 0
+                  )
+                  AND al.account_id = (SELECT account_id FROM mova.users WHERE id = :user_id)
+                  {filtro_grupo}
+                  {filtro_visto}
+                ORDER BY av.initial_time DESC
+                LIMIT :limit
+                """
+            ),
+            params,
+        )
+    ).mappings().all()
+
+    itens = [
+        {
+            "id": r["id"],
+            "alarme": r["alarme"],
+            # 3 é o nível que toca o som no monitor antigo.
+            "nivel": r["nivel"],
+            "inicio": r["initial_time"].isoformat() if r["initial_time"] else None,
+            "fim": r["final_time"].isoformat() if r["final_time"] else None,
+            "unit_id": r["unit_id"],
+            "placa": r["placa"],
+            "prefixo": r["prefixo"],
+            "motorista": r["motorista"],
+            "velocidade": r["velocidade"],
+            "endereco": r["endereco"],
+            "latitude": float(r["lat"]) if r["lat"] not in (None, "") else None,
+            "longitude": float(r["lon"]) if r["lon"] not in (None, "") else None,
+            "visualizado": bool(r["visualizado"]),
+            "observacao": r["observacao"],
+        }
+        for r in linhas
+    ]
+    return {
+        "janela_horas": horas,
+        "total": linhas[0]["total"] if linhas else 0,
+        "nao_visualizados": sum(1 for i in itens if not i["visualizado"]),
+        "itens": itens,
+    }
+
+
 @router.get("/alarmes/nao-visualizados", response_model=AlarmesNaoVisualizados)
 async def contar_alarmes_nao_visualizados(
     horas: int = Query(24, ge=1, le=720, description="Janela, em horas. Padrão: 24."),

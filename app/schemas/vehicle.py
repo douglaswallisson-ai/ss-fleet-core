@@ -93,6 +93,16 @@ class EstadoAtual(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class EquipamentoVinculado(BaseModel):
+    """Aparelho de telemetria vinculado ao veículo."""
+
+    device_id: int
+    identifier: Optional[str] = None
+    modelo: Optional[str] = None
+    operadora: Optional[str] = None
+    iccid: Optional[str] = None
+
+
 class VehicleResponse(BaseModel):
     """Schema for vehicle response - includes all relevant fields."""
     id: int
@@ -189,6 +199,8 @@ class VehicleResponse(BaseModel):
     vehicle_year: Optional[int] = None
     #: Última leitura do equipamento. Nulo quando o veículo nunca transmitiu.
     estado_atual: Optional[EstadoAtual] = None
+    #: Equipamento principal vinculado (tracked_unit_device ativo). Nulo sem vínculo.
+    equipamento: Optional[EquipamentoVinculado] = None
 
 
 class VehicleCursorResponse(BaseModel):
