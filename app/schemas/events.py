@@ -47,6 +47,15 @@ class EventListResponse(BaseModel):
     offset: int
 
 
+class AlarmesNaoVisualizados(BaseModel):
+    """Disparos do Monitor de Alarmes que ninguém marcou como vistos."""
+
+    nao_visualizados: int
+    #: Janela contada, em horas. Vai na resposta para a tela dizer "nas últimas
+    #: 24 h" — sem isso o número seria confundido com o total do monitor antigo.
+    janela_horas: int
+
+
 class EventAcknowledge(BaseModel):
     #: O que foi feito. Opcional, mas é o que dá sentido ao registro depois.
     note: Optional[str] = Field(None, max_length=1000)

@@ -22,6 +22,7 @@ from app.middleware.auth import require_permission
 from app.models.user import User
 from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.events import (
+    AlarmesNaoVisualizados,
     EventAcknowledge,
     EventListResponse,
     EventResponse,
@@ -131,6 +132,60 @@ async def list_events(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/alarmes/nao-visualizados", response_model=AlarmesNaoVisualizados)
+async def contar_alarmes_nao_visualizados(
+    horas: int = Query(24, ge=1, le=720, description="Janela, em horas. Padrão: 24."),
+    db: AsyncSession = Depends(get_db_read),
+    current_user=Depends(require_permission("reports", "read")),
+):
+    """
+    Disparos não visualizados, pela regra do Monitor de Alarmes do plataforma_web.
+
+    `fleet_events`, que o resto deste arquivo lê, está vazia em produção — o
+    alarme real mora em `alarm_violation`. Os filtros reproduzem
+    `alarmController::listViolationAction`: disparo aberto (`status = 1`),
+    alarme ativo e exibido no monitor, unidade ativa, grupo e subgrupo do
+    acesso do usuário, mesma conta. "Não visualizado" é `user_view` 0 ou nulo.
+
+    Diferença deliberada: só conta a janela pedida (24 h por decisão de
+    produto). O total em aberto passa de dez mil e não serve para agir.
+
+    `initial_time` é gravado em horário de Brasília, sem fuso. O corte é
+    calculado no mesmo relógio, para não depender do fuso da conexão.
+    """
+    total = (
+        await db.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM mova.alarm_violation av
+                JOIN mova.alarm al ON av.alarm_id = al.id AND al.status = 1
+                JOIN mova.tracked_unit tu ON av.unit_id = tu.id AND tu.status = 1
+                WHERE av.status = 1
+                  AND al.notif_monitor
+                  AND COALESCE(av.user_view, 0) = 0
+                  AND av.initial_time >= (now() AT TIME ZONE 'America/Sao_Paulo')
+                                         - make_interval(hours => :horas)
+                  AND al.group_id IN (
+                      SELECT group_id FROM mova.user_group_access WHERE user_id = :user_id
+                  )
+                  AND (
+                      al.subgroup_id IN (
+                          SELECT subgroup_id FROM mova.user_group_access WHERE user_id = :user_id
+                      )
+                      OR al.subgroup_id IS NULL
+                      OR al.subgroup_id = 0
+                  )
+                  AND al.account_id = (SELECT account_id FROM mova.users WHERE id = :user_id)
+                """
+            ),
+            {"user_id": current_user.user_id, "horas": horas},
+        )
+    ).scalar_one()
+
+    return AlarmesNaoVisualizados(nao_visualizados=total, janela_horas=horas)
 
 
 @router.post("/{event_id}/acknowledge", response_model=EventResponse)

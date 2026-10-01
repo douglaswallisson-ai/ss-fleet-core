@@ -41,6 +41,10 @@ async def list_positions(
         le=10080,
         description="Idade máxima da leitura, em minutos. Padrão: 24 h.",
     ),
+    group_id: Optional[int] = Query(
+        None,
+        description="Restringe a uma empresa, dentro do escopo do usuário (mesmo filtro de /vehicles).",
+    ),
     db: AsyncSession = Depends(get_db_read),
     current_user: User = Depends(require_permission("vehicles", "read")),
 ):
@@ -59,6 +63,13 @@ async def list_positions(
     sem_sinal = datetime.now() - timedelta(minutes=MINUTOS_SEM_SINAL)
 
     filtro_movimento = " AND COALESCE(ds.speed, 0) > 3" if only_moving else ""
+
+    # Recorte por empresa, **além** do escopo — nunca no lugar dele: um
+    # group_id fora do acesso do usuário continua sem devolver nada. Sem este
+    # filtro o mapa mostrava todas as empresas do usuário enquanto a lista de
+    # veículos mostrava só a escolhida no seletor.
+    filtro_grupo = " AND tu.group_id = :group_id" if group_id is not None else ""
+    params_grupo = {"group_id": group_id} if group_id is not None else {}
 
     linhas = (
         await db.execute(
@@ -87,11 +98,12 @@ async def list_positions(
                   AND ds.longitude <> 0
                   AND ds.local_time >= :limite
                   {filtro_movimento}
+                  {filtro_grupo}
                   {escopo_sql}
                 ORDER BY ds.local_time DESC
                 """
             ),
-            {"limite": limite, **escopo_params},
+            {"limite": limite, **escopo_params, **params_grupo},
         )
     ).mappings().all()
 

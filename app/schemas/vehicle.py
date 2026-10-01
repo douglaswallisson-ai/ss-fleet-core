@@ -143,7 +143,10 @@ class VehicleResponse(BaseModel):
     #: estava no banco sem nenhum endpoint expondo.
     cost_km: Optional[float] = None
     #: Ordem de serviço vinculada, quando o veículo está em manutenção.
-    os_num: Optional[str] = None
+    #: Inteiro, como a coluna em `tracked_unit` e o modelo. Declarado como
+    #: texto, a lista inteira caía com erro de validação no primeiro veículo
+    #: com `os_num = 0` — e grupo nenhum aparecia.
+    os_num: Optional[int] = None
     os_id: Optional[int] = None
 
     # ------------------------------------------------------------------ #

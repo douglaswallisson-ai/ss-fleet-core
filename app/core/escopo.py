@@ -67,16 +67,23 @@ def clausula_escopo(
     subgrupos. Era vazamento dentro da mesma conta.
 
     Devolve string vazia quando não há filtro a aplicar (master).
+
+    O `CAST` em cada uso de `:escopo_subgrupos` não é enfeite. Quando o valor é
+    `None` — justamente o caso do acesso ao grupo inteiro —, o asyncpg manda um
+    nulo sem tipo, e o PostgreSQL recusa `$n IS NULL` com "could not determine
+    data type of parameter". Com lista preenchida o tipo vem do valor e o erro
+    não aparece, por isso ele passou despercebido.
     """
     if not grupos:
         return "", {}
 
+    subgrupos_sql = "CAST(:escopo_subgrupos AS integer[])"
     return (
-        f" AND {alias}.{coluna_grupo} = ANY(:escopo_grupos)"
+        f" AND {alias}.{coluna_grupo} = ANY(CAST(:escopo_grupos AS integer[]))"
         f" AND ("
-        f"    :escopo_subgrupos IS NULL"
-        f"    OR {alias}.{coluna_subgrupo} = ANY(:escopo_subgrupos)"
-        f"    OR (0 = ANY(:escopo_subgrupos) AND {alias}.{coluna_subgrupo} IS NULL)"
+        f"    {subgrupos_sql} IS NULL"
+        f"    OR {alias}.{coluna_subgrupo} = ANY({subgrupos_sql})"
+        f"    OR (0 = ANY({subgrupos_sql}) AND {alias}.{coluna_subgrupo} IS NULL)"
         f")",
         {"escopo_grupos": grupos, "escopo_subgrupos": subgrupos},
     )
