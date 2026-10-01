@@ -23,6 +23,8 @@ class FaixasMotorista(BaseModel):
     parado_acelerando: Optional[float] = None
     #: Inclui o parado produtivo, como no Power BI.
     parado_ligado: Optional[float] = None
+    #: A parte produtiva do parado ligado, para quem precisa separar.
+    parado_produtivo: Optional[float] = None
     tolerancia: Optional[float] = None
 
 
@@ -38,6 +40,8 @@ class MotoristaRanking(BaseModel):
     driver_id: int
     nome: Optional[str] = None
     cnh_validade: Optional[date] = None
+    cnh_numero: Optional[str] = None
+    cnh_categoria: Optional[str] = None
     km: float
     horas: float
     litros: float

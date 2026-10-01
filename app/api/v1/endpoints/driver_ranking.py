@@ -156,6 +156,7 @@ async def ranking_motoristas(
                            SUM(COALESCE(t.time_yellow, 0)) AS am,
                            SUM(COALESCE(t.time_stop_engine_on, 0)
                              + COALESCE(t.time_stop_engine_on_productive, 0)) AS pl,
+                           SUM(COALESCE(t.time_stop_engine_on_productive, 0)) AS pp,
                            SUM(COALESCE(t.time_banguela, 0)) AS mst,
                            SUM(COALESCE(t.time_red, 0)) AS ve,
                            SUM(COALESCE(t.time_tolerancia, 0)) AS tol,
@@ -204,7 +205,10 @@ async def ranking_motoristas(
             r["id"]: r
             for r in (
                 await db.execute(
-                    text("SELECT id, name, cnh_validate FROM mova.driver WHERE id = ANY(:ids)"),
+                    text(
+                        "SELECT id, name, cnh_validate, cnh, cnh_category"
+                        " FROM mova.driver WHERE id = ANY(:ids)"
+                    ),
                     {"ids": ids},
                 )
             ).mappings()
@@ -251,6 +255,8 @@ async def ranking_motoristas(
                 driver_id=h["driver_id"],
                 nome=cad.get("name"),
                 cnh_validade=cad.get("cnh_validate"),
+                cnh_numero=(cad.get("cnh") or "").strip() or None,
+                cnh_categoria=(cad.get("cnh_category") or "").strip() or None,
                 km=round(km, 1),
                 horas=round(horas, 1),
                 litros=round(litros, 1),
@@ -260,6 +266,7 @@ async def ranking_motoristas(
                 faixas=FaixasMotorista(
                     **{chave: _pct(float(t[col] or 0), fx) for chave, col, _ in FAIXAS} if t else {},
                     tolerancia=_pct(float(t["tol"] or 0), fx) if t else None,
+                    parado_produtivo=_pct(float(t["pp"] or 0), fx) if t else None,
                 ),
                 eventos_por_hora=EventosPorHora(
                     aceleracao_brusca=round(por_hora(h["acel"]), 2),
