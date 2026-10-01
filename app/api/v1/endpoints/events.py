@@ -67,8 +67,13 @@ async def list_events(
         where.append("e.vehicle_id = :vehicle_id")
         params["vehicle_id"] = vehicle_id
     if severity:
-        where.append("e.severity = :severity")
-        params["severity"] = severity
+        # O enum do banco (eventseverity) é INFO/WARNING/CRITICAL. A tela manda
+        # minúsculo, e o cast falhava com 500 em toda abertura da tela Início.
+        sev = severity.strip().upper()
+        if sev not in ("INFO", "WARNING", "CRITICAL"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "severity deve ser info, warning ou critical")
+        where.append("e.severity = CAST(:severity AS mova.eventseverity)")
+        params["severity"] = sev
     if event_type:
         where.append("e.event_type = :event_type")
         params["event_type"] = event_type
@@ -111,9 +116,9 @@ async def list_events(
                 f"""
                 SELECT
                     COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE e.severity = 'critical')      AS critical,
-                    COUNT(*) FILTER (WHERE e.severity = 'warning')       AS warning,
-                    COUNT(*) FILTER (WHERE e.severity = 'info')          AS info,
+                    COUNT(*) FILTER (WHERE e.severity = 'CRITICAL')      AS critical,
+                    COUNT(*) FILTER (WHERE e.severity = 'WARNING')       AS warning,
+                    COUNT(*) FILTER (WHERE e.severity = 'INFO')          AS info,
                     COUNT(*) FILTER (WHERE e.acknowledged IS NOT TRUE)   AS pending,
                     COUNT(DISTINCT e.vehicle_id)                          AS vehicles
                 FROM mova.fleet_events e
