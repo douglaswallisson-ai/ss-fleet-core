@@ -5,7 +5,7 @@ Combines all endpoint routers.
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import fleet_health, positions, auth, vehicles, devices, tracked_unit_devices, vcms_unit_devices, drivers, reports, groups, subgroups, history_detailed, bus_lines, tracking, events, video, indicators, pois
+from app.api.v1.endpoints import fleet_health, positions, auth, vehicles, devices, tracked_unit_devices, vcms_unit_devices, drivers, driver_ranking, reports, groups, subgroups, history_detailed, bus_lines, tracking, events, video, indicators, pois
 from app.routers.admin import permissions_router, user_group_access_router
 
 api_router = APIRouter()
@@ -19,6 +19,9 @@ api_router.include_router(positions.router, prefix="/positions", tags=["position
 api_router.include_router(fleet_health.router, prefix="/fleet-health", tags=["fleet-health"])
 api_router.include_router(devices.router, prefix="/devices", tags=["Devices"])
 api_router.include_router(drivers.router, prefix="/drivers", tags=["Drivers"])
+# Prefixo próprio, e não /drivers/ranking: /drivers/{driver_id} captura
+# qualquer segmento e responderia 422 antes de chegar aqui.
+api_router.include_router(driver_ranking.router, prefix="/driver-ranking", tags=["Drivers"])
 api_router.include_router(bus_lines.router, prefix="/bus-lines", tags=["Bus Lines"])
 api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"])
 api_router.include_router(events.router, prefix="/events", tags=["Events"])
