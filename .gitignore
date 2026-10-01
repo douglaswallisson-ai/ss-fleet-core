@@ -5,3 +5,6 @@ venv/
 .venv/
 *.log
 .pytest_cache/
+
+# Mapa de relevo (SRTM, ~1 GB) - baixado por scripts/baixar_relevo.py
+data/relevo/
