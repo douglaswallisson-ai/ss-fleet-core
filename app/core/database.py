@@ -55,7 +55,7 @@ def get_sync_engine():
             pool_pre_ping=True,
             pool_size=settings.DATABASE_POOL_SIZE,
             max_overflow=settings.DATABASE_MAX_OVERFLOW,
-            echo=settings.DEBUG,
+            echo=settings.SQL_ECHO,
             poolclass=QueuePool,
         )
         # Monitoramento de consulta lenta, ligado junto com o motor.
@@ -106,7 +106,7 @@ async_engine = create_async_engine(
     pool_pre_ping=True,
     pool_size=settings.DATABASE_POOL_SIZE,
     max_overflow=settings.DATABASE_MAX_OVERFLOW,
-    echo=settings.DEBUG,
+    echo=settings.SQL_ECHO,
     # DS-1380: QueuePool é a implementação SÍNCRONA (usa threading.Event/
     # queue.Queue bloqueantes) e não é compatível com engines assíncronos.
     # AsyncAdaptedQueuePool é o equivalente async-safe, com a mesma API de
@@ -126,7 +126,7 @@ async_engine_replica = create_async_engine(
     pool_pre_ping=True,
     pool_size=settings.DATABASE_REPLICA_POOL_SIZE,
     max_overflow=settings.DATABASE_REPLICA_MAX_OVERFLOW,
-    echo=settings.DEBUG,
+    echo=settings.SQL_ECHO,
     # DS-1380: mesmo motivo do async_engine acima.
     poolclass=AsyncAdaptedQueuePool,
     connect_args=_connect_args(),

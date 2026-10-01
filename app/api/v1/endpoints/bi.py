@@ -12,6 +12,7 @@ Fontes, as mesmas do Power BI (vault: Power-BI-Modelo-de-Dados):
 - `mova.con_driver_h_km` (f_historico): horas por dia, veículo e condutor.
 """
 
+import asyncio
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -20,7 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.gerencial import Filtros, _periodo
-from app.core.database import get_db_read
+from app.core.database import AsyncSessionLocalReplica, get_db_read
 from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.middleware.auth import require_permission
 
@@ -58,6 +59,12 @@ async def _veiculos(db: AsyncSession, user, f: Filtros) -> list[int]:
     return [r[0] for r in rows.all()]
 
 
+async def _ler(sql: str, params: dict) -> list:
+    """Consulta numa sessão própria, para poder rodar junto de outras."""
+    async with AsyncSessionLocalReplica() as s:
+        return list((await s.execute(text(sql), params)).mappings().all())
+
+
 def _filtro_heatmap(f: Filtros) -> tuple[str, dict]:
     if f.driver_id is None:
         return "", {}
@@ -88,42 +95,31 @@ async def eventos(
     p = {"ids": ids, "cods": TODOS_CODIGOS, "ini": datetime.combine(ini, datetime.min.time()),
          "fim": datetime.combine(fim + timedelta(days=1), datetime.min.time()), **pextra}
 
-    por_entidade = (
-        await db.execute(
-            text(
-                f"""
+    # As três leituras no heatmap rodam ao mesmo tempo, cada uma na sua
+    # conexão: em sequência, com muitos veículos, passavam de um minuto.
+    por_entidade, matriz, por_dia = await asyncio.gather(
+        _ler(
+            f"""
                 SELECT h.unit_id, COALESCE(h.driver_id, 0) AS driver_id,
                        MAX(CONCAT_WS(' · ', NULLIF(TRIM(h.label), ''), NULLIF(NULLIF(TRIM(h.label2), ''), 'NULL'))) AS placa,
                        MAX(NULLIF(NULLIF(TRIM(h.driver_name), ''), 'NULL')) AS condutor,
                        {CASE_TIPO} AS tipo, COUNT(*) AS n, MAX(h.local_time) AS ultimo
                 {base}
                 GROUP BY h.unit_id, COALESCE(h.driver_id, 0), tipo
-                """
-            ),
+                """,
             p,
-        )
-    ).mappings().all()
-
-    matriz = (
-        await db.execute(
-            text(
-                f"""
+        ),
+        _ler(
+            f"""
                 SELECT EXTRACT(DOW FROM h.local_time)::int AS dow, EXTRACT(HOUR FROM h.local_time)::int AS hora,
                        {CASE_TIPO} AS tipo, COUNT(*) AS n
                 {base}
                 GROUP BY 1, 2, 3
-                """
-            ),
+                """,
             p,
-        )
-    ).mappings().all()
-
-    por_dia = (
-        await db.execute(
-            text(f"SELECT h.local_time::date AS dia, {CASE_TIPO} AS tipo, COUNT(*) AS n {base} GROUP BY 1, 2"),
-            p,
-        )
-    ).mappings().all()
+        ),
+        _ler(f"SELECT h.local_time::date AS dia, {CASE_TIPO} AS tipo, COUNT(*) AS n {base} GROUP BY 1, 2", p),
+    )
 
     totais: dict[str, int] = {t: 0 for t in TIPOS_EVENTO}
     placas: dict[int, dict] = {}
@@ -265,24 +261,25 @@ async def parado(
         " CASE WHEN s.poi_distance BETWEEN 0 AND 700 THEN NULLIF(NULLIF(TRIM(s.poi_name), ''), 'NULL') END, 'NÃO CADASTRADO')"
     )
 
-    async def q(sql: str):
-        return (await db.execute(text(sql), p)).mappings().all()
-
-    tot = (await q(f"SELECT COUNT(*) AS n, COALESCE(SUM(s.total_time), 0) AS seg {base}"))[0]
-    por_local = await q(f"SELECT {local} AS nome, SUM(s.total_time) AS seg, COUNT(*) AS n {base} GROUP BY 1 ORDER BY 2 DESC LIMIT 30")
-    por_veiculo = await q(
+    # Sete leituras independentes: juntas, cada uma na sua conexão.
+    tot, por_local, por_veiculo, por_condutor, detalhe, por_hora, por_dia_mes = await asyncio.gather(
+        _ler(f"SELECT COUNT(*) AS n, COALESCE(SUM(s.total_time), 0) AS seg {base}", p),
+        _ler(f"SELECT {local} AS nome, SUM(s.total_time) AS seg, COUNT(*) AS n {base} GROUP BY 1 ORDER BY 2 DESC LIMIT 30", p),
+        _ler(
         f"SELECT s.unit_id, MAX(s.label) AS nome, SUM(s.total_time) AS seg, COUNT(*) AS n {base} GROUP BY 1 ORDER BY 3 DESC LIMIT 30"
-    )
-    por_condutor = await q(
+    , p),
+        _ler(
         f"SELECT COALESCE(s.driver_id, 0) AS driver_id, COALESCE(MAX(NULLIF(NULLIF(TRIM(s.driver_name), ''), 'NULL')), 'NÃO INFORMADO') AS nome,"
         f" SUM(s.total_time) AS seg, COUNT(*) AS n {base} GROUP BY 1 ORDER BY 3 DESC LIMIT 30"
-    )
-    detalhe = await q(
+    , p),
+        _ler(
         f"SELECT s.start_time, s.label, COALESCE(NULLIF(NULLIF(TRIM(s.driver_name), ''), 'NULL'), 'NÃO INFORMADO') AS condutor,"
         f" {local} AS local, s.total_time AS seg, s.latitude, s.longitude {base} ORDER BY s.total_time DESC LIMIT 100"
+    , p),
+        _ler(f"SELECT EXTRACT(HOUR FROM s.start_time)::int AS k, SUM(s.total_time) AS seg {base} GROUP BY 1", p),
+        _ler(f"SELECT EXTRACT(DAY FROM s.start_time)::int AS k, SUM(s.total_time) AS seg {base} GROUP BY 1", p),
     )
-    por_hora = await q(f"SELECT EXTRACT(HOUR FROM s.start_time)::int AS k, SUM(s.total_time) AS seg {base} GROUP BY 1")
-    por_dia_mes = await q(f"SELECT EXTRACT(DAY FROM s.start_time)::int AS k, SUM(s.total_time) AS seg {base} GROUP BY 1")
+    tot = tot[0]
 
     h = lambda seg: round(float(seg or 0) / 3600, 2)  # noqa: E731
     return {

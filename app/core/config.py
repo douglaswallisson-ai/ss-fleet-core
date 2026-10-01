@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     DATABASE_MAX_OVERFLOW: int = Field(default=20, description="Maximum overflow connections")
     DATABASE_REPLICA_POOL_SIZE: int = Field(default=15, description="Read replica connection pool size")
     DATABASE_REPLICA_MAX_OVERFLOW: int = Field(default=30, description="Read replica maximum overflow connections")
+    # Separado do DEBUG: imprimir cada SQL com os parâmetros (listas de milhares
+    # de ids) trava o servidor quando várias telas consultam ao mesmo tempo.
+    SQL_ECHO: bool = Field(default=False, description="Imprime cada consulta SQL no log")
 
     # Redis settings
     REDIS_URL: RedisDsn = Field(
