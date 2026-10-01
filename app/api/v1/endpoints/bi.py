@@ -109,9 +109,9 @@ async def eventos(
             text(
                 f"""
                 SELECT EXTRACT(DOW FROM h.local_time)::int AS dow, EXTRACT(HOUR FROM h.local_time)::int AS hora,
-                       COUNT(*) AS n
+                       {CASE_TIPO} AS tipo, COUNT(*) AS n
                 {base}
-                GROUP BY 1, 2
+                GROUP BY 1, 2, 3
                 """
             ),
             p,
@@ -158,7 +158,7 @@ async def eventos(
         "por_placa": sorted(placas.values(), key=lambda x: -x["total"])[:50],
         "por_condutor": sorted(condutores.values(), key=lambda x: -x["total"])[:50],
         # dow: 0 = domingo, como o EXTRACT do PostgreSQL.
-        "matriz": [{"dow": r["dow"], "hora": r["hora"], "n": int(r["n"])} for r in matriz],
+        "matriz": [{"dow": r["dow"], "hora": r["hora"], "tipo": r["tipo"], "n": int(r["n"])} for r in matriz],
         "por_dia": sorted(dias.values(), key=lambda x: x["dia"]),
     }
 
