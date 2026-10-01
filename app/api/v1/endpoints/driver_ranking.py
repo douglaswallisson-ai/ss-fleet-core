@@ -83,11 +83,17 @@ async def ranking_motoristas(
     start_date: Optional[date] = Query(None, description="Padrão: 30 dias antes de ontem"),
     end_date: Optional[date] = Query(None, description="Inclusivo. Padrão: ontem"),
     group_id: Optional[int] = Query(None, description="Restringe a uma empresa, dentro do escopo"),
+    unit_id: Optional[int] = Query(None, description="Restringe a um veículo"),
+    por: str = Query(
+        "motorista",
+        pattern="^(motorista|veiculo)$",
+        description="motorista (RANK do BI) ou veiculo (RANK POR PLACA). Com veiculo, driver_id na resposta é o id do veículo.",
+    ),
     db: AsyncSession = Depends(get_db_read),
     current_user=Depends(require_permission("reports", "read")),
 ):
     """
-    Pontuação, estrelas e posição de cada motorista no período.
+    Pontuação, estrelas e posição de cada motorista (ou veículo) no período.
 
     O padrão termina **ontem**: `con_driver_h_km` nunca tem linha do dia
     corrente, e incluir hoje só puxaria as médias para baixo.
@@ -109,7 +115,14 @@ async def ranking_motoristas(
         if group_id is not None:
             sql += f" AND {alias}.group_id = :group_id"
             params = {**params, "group_id": group_id}
+        if unit_id is not None:
+            sql += f" AND {alias}.unit_id = :unit_id"
+            params = {**params, "unit_id": unit_id}
         return sql, params
+
+    # Coluna de agrupamento. Valor fixo de duas opções validadas no Query,
+    # nunca texto do usuário — por isso pode entrar no SQL.
+    chave = "unit_id" if por == "veiculo" else "driver_id"
 
     periodo = {"ini": inicio, "fim": fim}
 
@@ -118,7 +131,7 @@ async def ranking_motoristas(
         await db.execute(
             text(
                 f"""
-                SELECT COALESCE(h.driver_id, 0) AS driver_id,
+                SELECT COALESCE(h.{chave}, 0) AS driver_id,
                        SUM(h.time_traveled_hist) / 3600.0 AS horas,
                        SUM(h.distance_traveled_hist) / 1000.0 AS km,
                        -- Combustível negativo vira 0 na carga do BI.
@@ -147,7 +160,7 @@ async def ranking_motoristas(
             await db.execute(
                 text(
                     f"""
-                    SELECT COALESCE(t.driver_id, 0) AS driver_id,
+                    SELECT COALESCE(t.{chave}, 0) AS driver_id,
                            SUM(COALESCE(t.time_green, 0)) AS g,
                            SUM(COALESCE(t.time_extra_eco, 0)) AS ex,
                            SUM(COALESCE(t.time_inercia, 0)) AS ine,
@@ -200,7 +213,20 @@ async def ranking_motoristas(
 
     ids = [r["driver_id"] for r in hist if r["driver_id"]]
     cadastro = {}
-    if ids:
+    if ids and por == "veiculo":
+        cadastro = {
+            r["id"]: r
+            for r in (
+                await db.execute(
+                    text(
+                        "SELECT id, CONCAT_WS(' · ', NULLIF(TRIM(label2), ''), label) AS name"
+                        " FROM mova.tracked_unit WHERE id = ANY(:ids)"
+                    ),
+                    {"ids": ids},
+                )
+            ).mappings()
+        }
+    elif ids:
         cadastro = {
             r["id"]: r
             for r in (
