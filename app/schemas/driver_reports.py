@@ -70,12 +70,16 @@ class RpmBandTimeResponse(BaseModel):
     subgroup_id: int = Field(..., description="Subgroup ID")
     driver_id: Optional[int] = Field(None, description="Driver ID (can be NULL)")
     stop_engine_on: int = Field(..., description="Time stopped with engine on including productive time (seconds)")
-    blue: int = Field(..., description="Time in blue RPM band (seconds)")
-    green: int = Field(..., description="Time in green RPM band (seconds)")
+    parado_acelerando: int = Field(0, description="time_stop_accel (seconds)")
+    movimento_sem_tracao: int = Field(0, description="time_banguela (seconds)")
+    blue: int = Field(..., description="time_blue: batendo transmissão (seconds)")
+    green: int = Field(..., description="time_green only, without extra eco (seconds)")
+    extra_economica: int = Field(0, description="time_extra_eco (seconds)")
     yellow: int = Field(..., description="Time in yellow RPM band (seconds)")
     red: int = Field(..., description="Time in red RPM band (seconds)")
     inercia: int = Field(..., description="Time in inertia/coasting (seconds)")
-    total_time: int = Field(..., description="Total time (seconds)")
+    tolerancia: int = Field(0, description="time_tolerancia (seconds)")
+    total_time: int = Field(..., description="Sum of the 11 columns above (seconds)")
 
     model_config = {"from_attributes": True}
 

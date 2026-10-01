@@ -1858,20 +1858,33 @@ async def get_rpm_band_time_cursor(
                 ctd.group_id,
                 ctd.subgroup_id,
                 ctd.driver_id,
+                -- DS-1396/DS-1497, como no CodeCommit e no BI (vault:
+                -- nomes-diferentes-faixas-bi-vs-legado): verde sem extra
+                -- econômica, e total_time = soma das 11 colunas. Antes o verde
+                -- vinha somado à extra econômica e o total deixava de fora
+                -- parado acelerando, movimento sem tração e tolerância, o que
+                -- inflava todo percentual calculado sobre ele.
                 COALESCE(SUM(ctd.time_stop_engine_on), 0) + COALESCE(SUM(ctd.time_stop_engine_on_productive), 0) AS stop_engine_on,
+                COALESCE(SUM(ctd.time_stop_accel), 0) AS parado_acelerando,
+                COALESCE(SUM(ctd.time_banguela), 0) AS movimento_sem_tracao,
                 COALESCE(SUM(ctd.time_blue), 0) AS blue,
-                COALESCE(SUM(ctd.time_green), 0) + COALESCE(SUM(ctd.time_extra_eco), 0) AS green,
+                COALESCE(SUM(ctd.time_green), 0) AS green,
+                COALESCE(SUM(ctd.time_extra_eco), 0) AS extra_economica,
                 COALESCE(SUM(ctd.time_yellow), 0) AS yellow,
                 COALESCE(SUM(ctd.time_red), 0) AS red,
                 COALESCE(SUM(ctd.time_inercia), 0) AS inercia,
+                COALESCE(SUM(ctd.time_tolerancia), 0) AS tolerancia,
                 COALESCE(SUM(ctd.time_stop_engine_on), 0)
                     + COALESCE(SUM(ctd.time_stop_engine_on_productive), 0)
+                    + COALESCE(SUM(ctd.time_stop_accel), 0)
+                    + COALESCE(SUM(ctd.time_banguela), 0)
                     + COALESCE(SUM(ctd.time_blue), 0)
                     + COALESCE(SUM(ctd.time_green), 0)
+                    + COALESCE(SUM(ctd.time_extra_eco), 0)
                     + COALESCE(SUM(ctd.time_yellow), 0)
                     + COALESCE(SUM(ctd.time_red), 0)
                     + COALESCE(SUM(ctd.time_inercia), 0)
-                    + COALESCE(SUM(ctd.time_extra_eco), 0) AS total_time,
+                    + COALESCE(SUM(ctd.time_tolerancia), 0) AS total_time,
                 ROW_NUMBER() OVER (ORDER BY ctd."day" DESC, ctd.unit_id, ctd.driver_id) AS row_id
             FROM
                 mova.con_telemetry_day ctd
@@ -1887,7 +1900,8 @@ async def get_rpm_band_time_cursor(
         )
         SELECT
             "day", unit_id, group_id, subgroup_id, driver_id,
-            stop_engine_on, blue, green, yellow, red, inercia, total_time, row_id
+            stop_engine_on, blue, green, yellow, red, inercia, total_time, row_id,
+            parado_acelerando, movimento_sem_tracao, extra_economica, tolerancia
         FROM ranked_data
         WHERE (
             :cursor_dt IS NULL
@@ -1941,7 +1955,13 @@ async def get_rpm_band_time_cursor(
             yellow=row[8] or 0,
             red=row[9] or 0,
             inercia=row[10] or 0,
-            total_time=row[11] or 0
+            total_time=row[11] or 0,
+            # Colunas novas no fim do SELECT, para os índices de antes (e o
+            # row_id do cursor, em 12) não mudarem.
+            parado_acelerando=row[13] or 0,
+            movimento_sem_tracao=row[14] or 0,
+            extra_economica=row[15] or 0,
+            tolerancia=row[16] or 0,
         )
         for row in rows
     ]
