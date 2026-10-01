@@ -78,12 +78,18 @@ def clausula_escopo(
         return "", {}
 
     subgrupos_sql = "CAST(:escopo_subgrupos AS integer[])"
+    # Registro sem subgrupo (nulo ou 0) aparece para quem tem acesso a
+    # qualquer subgrupo do mesmo grupo — a regra do plataforma_web (vault:
+    # hierarquia-grupo-subgrupo-acesso, seção 4). Antes ele só aparecia para
+    # quem tinha o "subgrupo 0" no acesso, e a tela de Usuários nunca grava
+    # isso: na prática o registro sumia para todo mundo.
     return (
         f" AND {alias}.{coluna_grupo} = ANY(CAST(:escopo_grupos AS integer[]))"
         f" AND ("
         f"    {subgrupos_sql} IS NULL"
         f"    OR {alias}.{coluna_subgrupo} = ANY({subgrupos_sql})"
-        f"    OR (0 = ANY({subgrupos_sql}) AND {alias}.{coluna_subgrupo} IS NULL)"
+        f"    OR {alias}.{coluna_subgrupo} IS NULL"
+        f"    OR {alias}.{coluna_subgrupo} = 0"
         f")",
         {"escopo_grupos": grupos, "escopo_subgrupos": subgrupos},
     )

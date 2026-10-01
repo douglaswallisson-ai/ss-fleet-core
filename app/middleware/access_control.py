@@ -158,11 +158,15 @@ class SecureAsyncSession(AsyncSession):
                         # NULL subgroup means access to shared resources only
                         subgroup_conditions.append(model_class.subgroup_id.is_(None))
                     else:
-                        # Specific subgroup: match subgroup_id OR NULL (shared resources)
+                        # Specific subgroup: match subgroup_id OR "no subgroup".
+                        # 0 and NULL both mean "no subgroup" in the legacy
+                        # register (DS-1535); the plataforma_web shows both to
+                        # anyone with access to the group.
                         subgroup_conditions.append(
                             or_(
                                 model_class.subgroup_id == subgroup_id,
-                                model_class.subgroup_id.is_(None)
+                                model_class.subgroup_id.is_(None),
+                                model_class.subgroup_id == 0,
                             )
                         )
 

@@ -64,7 +64,9 @@ class SQLAccessControlBuilder:
             accessible_subgroups: Subgroup IDs user has access to (from group_access)
 
         Returns:
-            Filtered list of valid subgroup IDs or None
+            Filtered list of valid subgroup IDs; [-1] (matches nothing) when none
+            of the requested subgroups is allowed; None only when the user has
+            group-wide access
 
         Security:
             - If user has NO specific subgroup access (accessible_subgroups is None),
@@ -105,7 +107,12 @@ class SQLAccessControlBuilder:
                 rejected=list(rejected)
             )
 
-        return valid_subgroups if valid_subgroups else None
+        # Nenhum pedido válido = nenhum subgrupo, nunca "sem filtro". Devolver
+        # None aqui virava `:subgroup_ids IS NULL` no SQL e liberava o grupo
+        # inteiro para quem pediu um subgrupo proibido (vault:
+        # multi-tenant-account-id, 3.1 — o mesmo tipo de falha do SEC-2025-001).
+        # -1 não existe como subgrupo, então o filtro não casa com nada.
+        return valid_subgroups if valid_subgroups else [-1]
 
     @staticmethod
     def build_group_subgroup_sql_filter(

@@ -61,8 +61,11 @@ class TestSubgroupAccessValidation:
 
         assert result is None, "User with NULL subgroup should not be able to request specific subgroups"
 
-    def test_user_requesting_empty_list_returns_none(self):
-        """Test: Requesting empty list of subgroups returns None."""
+    def test_user_requesting_empty_list_matches_nothing(self):
+        """Test: Requesting an empty list of subgroups matches nothing.
+
+        None would mean "no subgroup filter" in the SQL (`:subgroup_ids IS NULL`).
+        """
         builder = SQLAccessControlBuilder()
         accessible_subgroups = [15812, 15813]
         requested_subgroups = []
@@ -72,10 +75,14 @@ class TestSubgroupAccessValidation:
             accessible_subgroups
         )
 
-        assert result is None, "Empty request should return None"
+        assert result == [-1], "Empty request must match nothing, never disable the filter"
 
-    def test_user_requesting_all_unauthorized_subgroups_returns_none(self):
-        """Test: Requesting only unauthorized subgroups returns None."""
+    def test_user_requesting_all_unauthorized_subgroups_matches_nothing(self):
+        """Test: Requesting only unauthorized subgroups matches nothing.
+
+        Returning None here was the bug: it became `:subgroup_ids IS NULL` and
+        released every subgroup of the group (vault: multi-tenant-account-id 3.1).
+        """
         builder = SQLAccessControlBuilder()
         accessible_subgroups = [15812, 15813]
         requested_subgroups = [15999, 16000]  # All unauthorized
@@ -85,7 +92,7 @@ class TestSubgroupAccessValidation:
             accessible_subgroups
         )
 
-        assert result is None, "All unauthorized requests should return None"
+        assert result == [-1], "All unauthorized requests must match nothing"
 
 
 class TestAccessParamsBuilder:
@@ -331,8 +338,9 @@ class TestIntegrationScenarios:
             malicious_request
         )
 
-        # Attack is blocked
-        assert subgroups is None or 15813 not in subgroups, \
+        # Attack is blocked. None would be a breach too: no subgroup filter at
+        # all, so the attacker would see 15813 and every other subgroup.
+        assert subgroups == [-1], \
             "SECURITY BREACH: Attacker gained access to unauthorized subgroup!"
 
     def test_scenario_attack_null_subgroup_user_requests_specific_subgroups(self):
