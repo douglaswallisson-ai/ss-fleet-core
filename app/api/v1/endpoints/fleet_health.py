@@ -133,13 +133,20 @@ async def get_fleet_health(
                     SUM(COALESCE(td.time_banguela, 0))   AS t_sem_tracao,
                     SUM(COALESCE(td.time_tolerancia, 0)) AS t_tolerancia,
 
-                    SUM(COALESCE(td.count_over_speed, 0))        AS c_velocidade,
-                    -- `count_cluth_excess` tem o nome grafado assim na
-                    -- tabela; é o excesso de embreagem, não o uso normal
-                    -- que `count_clutch` conta.
-                    SUM(COALESCE(td.count_cluth_excess, 0))      AS c_embreagem,
-                    SUM(COALESCE(td.count_hard_acel, 0))         AS c_aceleracao,
-                    SUM(COALESCE(td.count_hard_brake, 0))        AS c_freada,
+                    -- Contadores de con_driver_h_km (count_acel_excess etc.),
+                    -- como na fórmula do agregador. Os de con_telemetry_day
+                    -- (count_over_speed, count_hard_acel…) são outra contagem:
+                    -- num dia da FERTRAN, 7.595 excessos de velocidade lá
+                    -- contra 0 aqui, e embreagem 0 lá contra 29 aqui — a
+                    -- cascata disparava "Velocidade Excessiva" sem motivo.
+                    -- Velocidade = as quatro colunas, como `qtd_vel` do BI.
+                    SUM(COALESCE(dhk.count_speed_excess, 0)
+                      + COALESCE(dhk.count_speed_excess_dry_l1, 0)
+                      + COALESCE(dhk.count_speed_excess_dry_l2, 0)
+                      + COALESCE(dhk.count_speed_excess_dry_l3, 0)) AS c_velocidade,
+                    SUM(COALESCE(dhk.count_clutch_excess, 0))      AS c_embreagem,
+                    SUM(COALESCE(dhk.count_acel_excess, 0))        AS c_aceleracao,
+                    SUM(COALESCE(dhk.count_break_excess, 0))       AS c_freada,
 
                     -- driver_id zero é sentinela de "sem condutor
                     -- identificado", não um motorista de id zero.
