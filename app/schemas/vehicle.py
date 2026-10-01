@@ -85,6 +85,10 @@ class EstadoAtual(BaseModel):
     #: Quando esta leitura chegou. Sem ela, não há como saber se o odômetro é
     #: de hoje ou de três meses atrás.
     local_time: Optional[datetime] = None
+    #: Velocidade e ignição da última leitura — o que define a situação
+    #: (em rota, parado, sem sinal) na lista de veículos.
+    speed: Optional[float] = None
+    ignition: Optional[bool] = None
 
     model_config = {"from_attributes": True}
 

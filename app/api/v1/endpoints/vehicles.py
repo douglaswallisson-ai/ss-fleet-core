@@ -138,6 +138,12 @@ async def list_vehicles(
 
     query = select(*select_columns).where(access_filter)
 
+    # Status 3 é unidade removida (exclusão lógica). O plataforma_web filtra
+    # `status <> 3` em toda listagem (vault: Unidades, seção 3); sem isso a
+    # FERTRAN aparecia com 531 veículos, 318 deles removidos, e todo
+    # indicador sobre a frota (disponibilidade, médias) saía diluído.
+    query = query.where(Vehicle.status != 3)
+
     if group_id is not None:
         query = query.where(Vehicle.group_id == group_id)
 
@@ -175,7 +181,7 @@ async def list_vehicles(
                         SELECT unit_id, odom, odom_total, odom_quality_flag,
                                hourmeter_total, can_avg_fuel_economy_kmpl,
                                can_total_odometer, can_engine_hourmeter,
-                               local_time
+                               local_time, speed, ignition
                         FROM mova.dev_status
                         WHERE unit_id = ANY(:ids)
                         """
