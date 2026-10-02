@@ -355,3 +355,95 @@ async def ocioso(
         )
     veiculos.sort(key=lambda v: -v["segundos_parado"])
     return {"inicio": ini.isoformat(), "fim": fim.isoformat(), "veiculos": veiculos}
+
+
+@router.get("/roi")
+async def roi_contrato(
+    f: Filtros = Depends(),
+    db: AsyncSession = Depends(get_db_read),
+    current_user=Depends(require_permission("reports", "read")),
+):
+    """
+    ROI e payback do contrato, para o topo da tela Início.
+
+    Contrato: `mova.cliente_financeiro_vigencia` (parcela mensal, implantação,
+    custo do litro e redução estimada, por cliente). Consumo: litros reais dos
+    últimos 30 dias (`con_driver_h_km`, combustível negativo vira 0).
+
+    Fórmula aprovada pelo produto em 01/10/2026 (não há regra no vault):
+    - economia estimada no mês = litros × custo do litro × redução estimada;
+    - ROI = economia ÷ parcela mensal;
+    - payback (meses) = implantação ÷ (economia − parcela); sem implantação, 0.
+
+    É estimativa a partir da meta de redução do contrato, não economia medida.
+    """
+    fim = date.today() - timedelta(days=1)
+    ini = fim - timedelta(days=29)
+    grupos, _ = escopo_do_usuario(current_user)
+    alvo = [f.group_id] if f.group_id is not None else [g for g in grupos if g and g > 0]
+    sql_g = "v.group_id = ANY(CAST(:grupos AS integer[]))" if alvo else "TRUE"
+    contratos = (
+        await db.execute(
+            text(
+                f"""
+                SELECT v.group_id, v.data_inicio_vigencia, v.data_fim_vigencia, v.tempo_contrato_meses,
+                       COALESCE(v.valor_implantacao, 0) AS implantacao, COALESCE(v.valor_parcela_mensal, 0) AS parcela,
+                       v.custo_medio_combustivel_l AS custo_l, v.reducao_estimada_pct AS reducao
+                FROM mova.cliente_financeiro_vigencia v
+                WHERE {sql_g}
+                """
+            ),
+            {"grupos": alvo},
+        )
+    ).mappings().all()
+    # Só contratos do escopo do usuário (master/interno vê tudo).
+    permitidos = None if getattr(current_user, "master", 0) or not grupos else set(grupos)
+    contratos = [c for c in contratos if permitidos is None or c["group_id"] in permitidos]
+    if not contratos:
+        return {"disponivel": False, "motivo": "Sem contrato cadastrado para esta empresa."}
+
+    esc, par = f.sql(current_user, "h")
+    ids = [c["group_id"] for c in contratos]
+    litros_por_grupo = {
+        r[0]: float(r[1] or 0)
+        for r in (
+            await db.execute(
+                text(
+                    f"""
+                    SELECT h.group_id, SUM(GREATEST(h.used_fuel_hist, 0)) / 1000.0
+                    FROM mova.con_driver_h_km h
+                    WHERE h.dt >= :ini AND h.dt <= :fim AND h.group_id = ANY(CAST(:ids AS integer[])) {esc}
+                    GROUP BY 1
+                    """
+                ),
+                {**par, "ini": ini, "fim": fim, "ids": ids},
+            )
+        ).all()
+    }
+    economia = parcela = implantacao = litros = 0.0
+    for c in contratos:
+        lt = litros_por_grupo.get(c["group_id"], 0.0)
+        litros += lt
+        economia += lt * float(c["custo_l"] or 0) * float(c["reducao"] or 0) / 100
+        parcela += float(c["parcela"])
+        implantacao += float(c["implantacao"])
+    if economia <= 0 or parcela <= 0:
+        return {"disponivel": False, "motivo": "Sem consumo ou sem parcela para calcular."}
+    liquido = economia - parcela
+    payback = 0.0 if implantacao <= 0 else (implantacao / liquido if liquido > 0 else None)
+    um = contratos[0] if len(contratos) == 1 else None
+    return {
+        "disponivel": True,
+        "inicio": ini.isoformat(),
+        "fim": fim.isoformat(),
+        "clientes": len(contratos),
+        "litros": round(litros),
+        "economia_estimada_mes": round(economia, 2),
+        "parcela_mensal": round(parcela, 2),
+        "implantacao": round(implantacao, 2),
+        "roi": round(economia / parcela, 2),
+        "payback_meses": None if payback is None else round(payback, 1),
+        "reducao_estimada_pct": float(um["reducao"]) if um and um["reducao"] is not None else None,
+        "custo_litro": float(um["custo_l"]) if um and um["custo_l"] is not None else None,
+        "vigencia_fim": um["data_fim_vigencia"].isoformat() if um and um["data_fim_vigencia"] else None,
+    }

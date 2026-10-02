@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.v1.endpoints.bi import _veiculos
+from app.api.v1.endpoints.bi import TIPOS_EVENTO, _veiculos
 from app.api.v1.endpoints.gerencial import Filtros, _periodo
 from app.core import relevo
 from app.core.database import AsyncSessionLocalReplica, get_db_read
@@ -39,7 +39,7 @@ PARALELO = 4
 
 SQL_POSICOES = """
     SELECT d.unit_id, d.local_time, d.latitude::float AS lat, d.longitude::float AS lon,
-           d.speed, d.altitude, COALESCE(d.driver_id, 0) AS driver_id
+           d.speed, d.altitude, COALESCE(d.driver_id, 0) AS driver_id, d.tracker_event_id
     FROM mova.dev_status_30 d
     WHERE d.unit_id = ANY(CAST(:ids AS integer[]))
       AND d.local_time >= :ini AND d.local_time < :fim
@@ -102,7 +102,43 @@ async def trajeto(
         if i % passo == 0 or i == len(andando) - 1
     ]
     km_med = res["km_medido"] or 0
+
+    # Eventos de condução no ponto exato em que aconteceram: a própria
+    # posição traz o evento (tracker_event_id). Não depende do heatmap, que
+    # chega com atraso. O km é o do último ponto em movimento até ali.
+    tipo_de = {c: tp for tp, cs in TIPOS_EVENTO.items() for c in cs}
+    km_por_hora = [(r["local_time"], km) for r, (km, _e) in zip(andando, serie)]
+    nomes = {
+        int(a): b
+        for a, b in (
+            await db.execute(
+                text("SELECT id, name FROM mova.tracker_event WHERE id = ANY(CAST(:ids AS integer[]))"),
+                {"ids": list({r["tracker_event_id"] for r in linhas if r["tracker_event_id"] in tipo_de})},
+            )
+        ).all()
+    } if any(r["tracker_event_id"] in tipo_de for r in linhas) else {}
+    eventos = []
+    i = 0
+    for r in linhas:
+        while i + 1 < len(km_por_hora) and km_por_hora[i + 1][0] <= r["local_time"]:
+            i += 1
+        cod = r["tracker_event_id"]
+        if cod not in tipo_de:
+            continue
+        eventos.append(
+            {
+                "hora": r["local_time"].strftime("%H:%M:%S"),
+                "tipo": tipo_de[cod],
+                "evento": nomes.get(cod),
+                "lat": r["lat"],
+                "lon": r["lon"],
+                "velocidade": r["speed"],
+                "km": round(km_por_hora[i][1], 2) if km_por_hora else None,
+            }
+        )
+
     return {
+        "eventos": eventos,
         "unit_id": unit_id,
         "dia": dia.isoformat(),
         "altitude_do_equipamento": tem_gps,
@@ -131,7 +167,7 @@ async def _calcular_dia(dia: date, ids: list[int]) -> dict[int, dict]:
             )
         ).all()
     por_unidade: dict[int, list] = defaultdict(list)
-    for u, _t, lat, lon, _v, _a, drv in linhas:
+    for u, _t, lat, lon, _v, _a, drv, _ev in linhas:
         por_unidade[u].append((lat, lon, drv))
 
     saida: dict[int, dict] = {u: {} for u in ids}
@@ -200,7 +236,11 @@ async def _ler_calculados(ids: list[int], ini: date, fim: date):
     resultado: dict[tuple[int, str], dict] = {}
     faltando: dict[date, list[int]] = defaultdict(list)
     for u, d in pares:
-        c = _MEMORIA.get(_chave(u, d)) or do_redis.get((u, d))
+        # Veículo que não rodou no dia tem resultado {} — vazio, mas calculado.
+        # Com `or`, o {} contava como "falta calcular": o cálculo recomeçava
+        # para sempre e a tela ficava indo e voltando de 0 a 67%.
+        k = _chave(u, d)
+        c = _MEMORIA[k] if k in _MEMORIA else do_redis.get((u, d))
         if c is None:
             faltando[d].append(u)
         else:
