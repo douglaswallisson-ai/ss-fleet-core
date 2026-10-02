@@ -325,11 +325,11 @@ async def acknowledge_event(
                        acknowledged, acknowledged_by, acknowledged_at
                 """
             ),
-            {"id": event_id, "user_id": user.id, "note": payload.note or ""},
+            {"id": event_id, "user_id": user.user_id, "note": payload.note or ""},
         )
     ).mappings().first()
 
     await db.commit()
 
-    logger.info("event_acknowledged", event_id=event_id, user_id=user.id)
+    logger.info("event_acknowledged", event_id=event_id, user_id=user.user_id)
     return EventResponse(**row)

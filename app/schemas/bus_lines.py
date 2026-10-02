@@ -49,6 +49,8 @@ class ShiftResponse(BaseModel):
     cerca_id_end: Optional[int] = None
     #: Dias da semana em que o turno opera.
     weekday: Optional[list[int]] = None
+    #: Também vale em feriado.
+    feriado: bool = False
     route_id: Optional[int] = None
     driver_id: Optional[int] = None
     unit_id: Optional[int] = None

@@ -140,7 +140,7 @@ async def _consolidar(
                 JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
                 WHERE e.timestamp >= :inicio
                   AND e.timestamp <= :fim
-                  AND e.severity = 'critical'{filtro_grupo}
+                  AND e.severity = 'CRITICAL'{filtro_grupo}
                 """
             ),
             params,

@@ -83,23 +83,19 @@ async def list_video_devices(
                     v.release_date, v.status,
                     tu.label  AS vehicle_label,
                     tu.label2 AS vehicle_prefix,
-                    d.serial  AS device_serial,
+                    d.serial_number AS device_serial,
                     d.imei    AS device_imei,
                     ultima.local_time AS last_communication,
                     ultima.latitude,
                     ultima.longitude,
                     ultima.speed,
                     ultima.ignition
-                FROM mova.vcms_unit_device v
+                FROM vcms.vcms_unit_device v
                 JOIN mova.tracked_unit tu ON tu.id = v.unit_id
                 LEFT JOIN mova.device d   ON d.id = v.device_id
-                LEFT JOIN LATERAL (
-                    SELECT local_time, latitude, longitude, speed, ignition
-                    FROM mova.dev_status_30 s
-                    WHERE s.unit_id = v.unit_id
-                    ORDER BY s.local_time DESC
-                    LIMIT 1
-                ) ultima ON TRUE
+                -- Estado atual do veículo (uma linha por unidade). Buscar a última
+                -- posição em dev_status_30 varria todas as partições: 4 minutos.
+                LEFT JOIN mova.dev_status ultima ON ultima.unit_id = v.unit_id
                 WHERE v.status = 1
                   AND v.release_date IS NULL{escopo_sql}
                 ORDER BY tu.label2 NULLS LAST, tu.label
@@ -161,7 +157,7 @@ async def list_video_occurrences(
     where = [
         "e.timestamp >= :start",
         "e.timestamp <= :end",
-        "e.event_type = ANY(:tipos)",
+        "e.event_type::text = ANY(:tipos)",
     ]
     params: dict = {
         "start": start_date, "end": end_date, "tipos": list(tipos),
@@ -208,9 +204,9 @@ async def list_video_occurrences(
                 SELECT
                     COUNT(*) AS total,
                     COUNT(*) FILTER (WHERE e.acknowledged IS NOT TRUE) AS pending,
-                    COUNT(*) FILTER (WHERE e.event_type = ANY(:dms))   AS dms,
-                    COUNT(*) FILTER (WHERE e.event_type = ANY(:adas))  AS adas,
-                    COUNT(*) FILTER (WHERE e.event_type = ANY(:equip)) AS equipment,
+                    COUNT(*) FILTER (WHERE e.event_type::text = ANY(:dms))   AS dms,
+                    COUNT(*) FILTER (WHERE e.event_type::text = ANY(:adas))  AS adas,
+                    COUNT(*) FILTER (WHERE e.event_type::text = ANY(:equip)) AS equipment,
                     COUNT(DISTINCT e.vehicle_id) AS vehicles
                 FROM mova.fleet_events e
                 JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id

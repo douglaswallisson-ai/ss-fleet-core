@@ -39,6 +39,22 @@ from app.schemas.bus_lines import (
 logger = get_logger(__name__)
 router = APIRouter()
 
+#: `buss_line_shift.weekday` é text[] com os dias por extenso curto
+#: (seg, ter, …, feriado, util). A tela usa 0 = domingo … 6 = sábado.
+DIAS = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"]
+
+
+def _turno(r) -> dict:
+    """Linha do banco → ShiftResponse: dias em número, feriado e útil à parte."""
+    d = dict(r)
+    nomes = [str(x).lower() for x in (d.get("weekday") or [])]
+    dias = {DIAS.index(n) for n in nomes if n in DIAS}
+    if "util" in nomes:
+        dias |= {1, 2, 3, 4, 5}
+    d["weekday"] = sorted(dias)
+    d["feriado"] = "feriado" in nomes
+    return d
+
 
 @router.get("/", response_model=BusLineListResponse)
 async def list_bus_lines(
@@ -91,7 +107,7 @@ async def list_bus_lines(
     rows = result.mappings().all()
     total = rows[0]["total_count"] if rows else 0
 
-    logger.info("bus_lines_listed", user_id=user.id, returned=len(rows), total=total)
+    logger.info("bus_lines_listed", user_id=user.user_id, returned=len(rows), total=total)
 
     return BusLineListResponse(
         items=[BusLineResponse(**{k: v for k, v in r.items() if k != "total_count"}) for r in rows],
@@ -178,7 +194,7 @@ async def get_bus_line(
     return BusLineDetailResponse(
         **line,
         shifts=[
-            ShiftResponse(**s, stops=by_shift.get(s["id"], []))
+            ShiftResponse(**_turno(s), stops=by_shift.get(s["id"], []))
             for s in shifts
         ],
     )
@@ -315,7 +331,7 @@ async def get_trip_compliance(
 
     logger.info(
         "trip_compliance_queried",
-        user_id=user.id, line_id=line_id, date=str(operation_date),
+        user_id=user.user_id, line_id=line_id, date=str(operation_date),
         scheduled=scheduled, executed=executed,
     )
 
@@ -366,8 +382,10 @@ async def list_shifts(
     params: dict = {"id": line_id}
 
     if weekday is not None:
-        where.append(":weekday = ANY(s.weekday)")
-        params["weekday"] = weekday
+        # O dia vem em número; no banco está por extenso ("seg"). Dia útil
+        # (seg–sex) também cobre turnos marcados só como "util".
+        where.append("(:dia = ANY(s.weekday)" + (" OR 'util' = ANY(s.weekday))" if 1 <= weekday <= 5 else ")"))
+        params["dia"] = DIAS[weekday]
     if direction is not None:
         where.append("s.direction = :direction")
         params["direction"] = direction
@@ -390,4 +408,4 @@ async def list_shifts(
         )
     ).mappings().all()
 
-    return [ShiftResponse(**r, stops=[]) for r in rows]
+    return [ShiftResponse(**_turno(r), stops=[]) for r in rows]
