@@ -178,7 +178,6 @@ async def painel(
         "uni_sem": ("SELECT * FROM fleet_mvp.unidades_sem_sinal_faixa(:g, :i, :f)", p),
         "cond_sem": ("SELECT * FROM fleet_mvp.condutores_sem_sinal_faixa(:g, :i, :f)", p),
         "carga": ("SELECT * FROM fleet_mvp.carga_status(:g)", {"g": group_id}),
-        "insight": ("SELECT * FROM fleet_ai.ultimo_insight(:g, :f)", {"g": group_id, "f": fim}),
     }
     if comparar:
         consultas["comparacao"] = ("SELECT * FROM fleet_mvp.kpis_comparacao(:g, :i, :f, :ri, :rf)", pr)
@@ -190,6 +189,17 @@ async def painel(
         if _sem_acesso_ao_esquema(e):
             raise _erro_esquema() from e
         raise
+
+    # O texto da IA é opcional (vault A1: sem insight, os indicadores aparecem
+    # mesmo assim). Sem permissão no esquema fleet_ai, o painel segue sem ele.
+    insight_indisponivel = None
+    try:
+        res["insight"] = await _ler("SELECT * FROM fleet_ai.ultimo_insight(:g, :f)", {"g": group_id, "f": fim})
+    except (ProgrammingError, DBAPIError) as e:
+        if not _sem_acesso_ao_esquema(e):
+            raise
+        res["insight"] = []
+        insight_indisponivel = "sem_permissao"
 
     frota = (res["frota"] or [{}])[0]
     if not frota or not (frota.get("dias") or 0) or ((frota.get("dias") or 0) - (frota.get("dias_sem_dado") or 0)) <= 0:
@@ -301,6 +311,7 @@ async def painel(
             {"id": ins.get("id"), "texto": ins.get("texto"), "blocos": ins.get("blocos"), "gerado_em": ins.get("criado_em")}
             if ins and ins.get("texto") else None
         ),
+        "insight_indisponivel": insight_indisponivel,
         "data_quality": {
             "cobertura_combustivel_pct": frota.get("cobertura_combustivel_pct"),
             "confianca_combustivel": frota.get("confianca_combustivel"),
