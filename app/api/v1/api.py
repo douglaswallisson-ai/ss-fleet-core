@@ -5,7 +5,7 @@ Combines all endpoint routers.
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import fleet_health, positions, auth, vehicles, devices, tracked_unit_devices, vcms_unit_devices, drivers, driver_ranking, gerencial, bi, ai_fleet, relevo, operacao, escala_viagem, mapa, suporte, embed, acessos, sinotico, manutencao, timeline, reports, groups, subgroups, history_detailed, bus_lines, tracking, events, video, indicators, pois
+from app.api.v1.endpoints import fleet_health, positions, auth, vehicles, devices, tracked_unit_devices, vcms_unit_devices, drivers, driver_ranking, gerencial, bi, ai_fleet, relevo, operacao, escala_viagem, mapa, suporte, embed, acessos, sinotico, manutencao, timeline, jornada, reports, groups, subgroups, history_detailed, bus_lines, tracking, events, video, indicators, pois
 from app.routers.admin import permissions_router, user_group_access_router
 
 api_router = APIRouter()
@@ -35,6 +35,7 @@ api_router.include_router(acessos.router, prefix="/acessos", tags=["Acessos"])
 api_router.include_router(sinotico.router, prefix="/sinotico", tags=["Painel sinótico"])
 api_router.include_router(manutencao.router, prefix="/manutencao", tags=["Manutenção"])
 api_router.include_router(timeline.router, prefix="/eventos/timeline", tags=["Eventos"])
+api_router.include_router(jornada.router, prefix="/jornada", tags=["Jornada"])
 api_router.include_router(bus_lines.router, prefix="/bus-lines", tags=["Bus Lines"])
 api_router.include_router(tracking.router, prefix="/tracking", tags=["Tracking"])
 api_router.include_router(events.router, prefix="/events", tags=["Events"])
