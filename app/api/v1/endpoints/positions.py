@@ -87,9 +87,12 @@ async def list_positions(
                     ds.local_time,
                     ds.odom,
                     tu.group_id,
-                    tu.subgroup_id
+                    tu.subgroup_id,
+                    tu.unit_category_id AS categoria_id,
+                    uc.name         AS categoria
                 FROM mova.dev_status ds
                 JOIN mova.tracked_unit tu ON tu.id = ds.unit_id AND tu.status = 1
+                LEFT JOIN mova.unit_category uc ON uc.id = tu.unit_category_id
                 WHERE ds.latitude IS NOT NULL
                   AND ds.longitude IS NOT NULL
                   -- Coordenada zero é leitura sem fixo de GPS, não a costa da
@@ -122,6 +125,8 @@ async def list_positions(
             odom=r["odom"],
             group_id=r["group_id"],
             subgroup_id=r["subgroup_id"],
+            categoria_id=r["categoria_id"],
+            categoria=r["categoria"],
             sem_sinal=bool(r["local_time"] and r["local_time"] < sem_sinal),
         )
         for r in linhas

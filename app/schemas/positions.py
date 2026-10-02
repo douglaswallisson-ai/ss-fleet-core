@@ -24,6 +24,9 @@ class PositionResponse(BaseModel):
     odom: Optional[int] = None
     group_id: Optional[int] = None
     subgroup_id: Optional[int] = None
+    #: Categoria do cadastro (mova.unit_category): 3 Pesados, 12 Ônibus, 22 Micro ônibus, 20 Carreta…
+    categoria_id: Optional[int] = None
+    categoria: Optional[str] = None
     #: Última leitura mais antiga que o limite de comunicação.
     sem_sinal: bool = False
 
