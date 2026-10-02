@@ -8,3 +8,6 @@ venv/
 
 # Mapa de relevo (SRTM, ~1 GB) - baixado por scripts/baixar_relevo.py
 data/relevo/
+
+# Plano de viagem (Escala de Viagem) - armazenamento provisorio local
+data/escala_viagem.sqlite
