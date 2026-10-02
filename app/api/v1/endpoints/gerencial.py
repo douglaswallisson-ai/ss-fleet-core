@@ -373,7 +373,9 @@ async def roi_contrato(
     Fórmula aprovada pelo produto em 01/10/2026 (não há regra no vault):
     - economia estimada no mês = litros × custo do litro × redução estimada;
     - ROI = economia ÷ parcela mensal;
-    - payback (meses) = implantação ÷ (economia − parcela); sem implantação, 0.
+    - payback (meses) = custo total do contrato ÷ economia do mês, onde o custo
+      total é parcela × meses de contrato + implantação (definido pelo produto
+      em 01/10/2026: "em quanto tempo a economia paga todo o contrato").
 
     É estimativa a partir da meta de redução do contrato, não economia medida.
     """
@@ -420,17 +422,18 @@ async def roi_contrato(
             )
         ).all()
     }
-    economia = parcela = implantacao = litros = 0.0
+    economia = parcela = implantacao = litros = custo_total = 0.0
     for c in contratos:
         lt = litros_por_grupo.get(c["group_id"], 0.0)
         litros += lt
         economia += lt * float(c["custo_l"] or 0) * float(c["reducao"] or 0) / 100
         parcela += float(c["parcela"])
         implantacao += float(c["implantacao"])
+        meses = c["tempo_contrato_meses"] or 0
+        custo_total += float(c["parcela"]) * meses + float(c["implantacao"])
     if economia <= 0 or parcela <= 0:
         return {"disponivel": False, "motivo": "Sem consumo ou sem parcela para calcular."}
-    liquido = economia - parcela
-    payback = 0.0 if implantacao <= 0 else (implantacao / liquido if liquido > 0 else None)
+    payback = custo_total / economia if custo_total > 0 else None
     um = contratos[0] if len(contratos) == 1 else None
     return {
         "disponivel": True,
@@ -441,9 +444,143 @@ async def roi_contrato(
         "economia_estimada_mes": round(economia, 2),
         "parcela_mensal": round(parcela, 2),
         "implantacao": round(implantacao, 2),
+        "custo_total_contrato": round(custo_total, 2),
+        "meses_contrato": um["tempo_contrato_meses"] if um else None,
         "roi": round(economia / parcela, 2),
         "payback_meses": None if payback is None else round(payback, 1),
         "reducao_estimada_pct": float(um["reducao"]) if um and um["reducao"] is not None else None,
         "custo_litro": float(um["custo_l"]) if um and um["custo_l"] is not None else None,
         "vigencia_fim": um["data_fim_vigencia"].isoformat() if um and um["data_fim_vigencia"] else None,
+    }
+
+
+#: kg de CO₂ por litro de diesel (Power BI, "CO2 = Resultado Lts × 3,21").
+FATOR_CO2_KG_L = 3.21
+
+
+def _menos_um_ano(d: date) -> date:
+    try:
+        return d.replace(year=d.year - 1)
+    except ValueError:  # 29/02
+        return d.replace(year=d.year - 1, day=28)
+
+
+@router.get("/co2")
+async def co2_evitado(
+    inicio: Optional[date] = Query(None, description="Padrão: 12 meses até ontem"),
+    fim: Optional[date] = Query(None),
+    ref_inicio: Optional[date] = Query(None, description="Padrão: o mesmo período do ano anterior"),
+    ref_fim: Optional[date] = Query(None),
+    f: Filtros = Depends(),
+    db: AsyncSession = Depends(get_db_read),
+    current_user=Depends(require_permission("reports", "read")),
+):
+    """
+    CO₂ emitido e CO₂ evitado — base do certificado "CO₂ Reduzido".
+
+    Regra do Power BI (vault: indicadores-power-bi, P8 e dicionário "CO2"):
+    CO₂ = litros evitados × 3,21; litros evitados = melhora do km/l × consumo
+    atual. Aqui o km/l é o da telemetria (km com combustível ÷ litros,
+    `con_driver_h_km`), não o dos abastecimentos manuais — o módulo de
+    combustível ainda não está no sistema novo. É a mesma conta de
+    "litros que seriam gastos com a média de referência − litros gastos".
+
+    Sem melhora (km/l igual ou pior), o CO₂ evitado é zero e o motivo vem junto.
+    """
+    fim = fim or (date.today() - timedelta(days=1))
+    inicio = inicio or (_menos_um_ano(fim) + timedelta(days=1))
+    if fim < inicio or (fim - inicio).days > 366:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Período de até 366 dias")
+    ref_fim = ref_fim or _menos_um_ano(fim)
+    ref_inicio = ref_inicio or _menos_um_ano(inicio)
+    if ref_fim < ref_inicio or (ref_fim - ref_inicio).days > 366:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Referência de até 366 dias")
+    esc, par = f.sql(current_user, "h")
+
+    async def mensal(a: date, b: date):
+        rows = (
+            await db.execute(
+                text(
+                    f"""
+                    SELECT date_trunc('month', h.dt)::date AS mes,
+                           SUM(GREATEST(h.used_fuel_hist, 0)) / 1000.0 AS litros,
+                           SUM(CASE WHEN h.used_fuel_hist > 0 THEN h.distance_traveled_hist ELSE 0 END) / 1000.0 AS km_comb,
+                           SUM(h.distance_traveled_hist) / 1000.0 AS km,
+                           COUNT(DISTINCT h.unit_id) AS veiculos,
+                           COUNT(DISTINCT h.dt) AS dias
+                    FROM mova.con_driver_h_km h
+                    WHERE h.dt >= :a AND h.dt <= :b {esc}
+                    GROUP BY 1 ORDER BY 1
+                    """
+                ),
+                {**par, "a": a, "b": b},
+            )
+        ).mappings().all()
+        return [{k: (float(v) if k not in ("mes", "veiculos", "dias") else v) for k, v in r.items()} for r in rows]
+
+    atual, ref = await mensal(inicio, fim), await mensal(ref_inicio, ref_fim)
+
+    def total(ms):
+        t = {"litros": sum(m["litros"] for m in ms), "km_comb": sum(m["km_comb"] for m in ms), "km": sum(m["km"] for m in ms), "dias": sum(m["dias"] for m in ms)}
+        t["kml"] = t["km_comb"] / t["litros"] if t["litros"] > 0 else None
+        t["veiculos"] = max((m["veiculos"] for m in ms), default=0)
+        return t
+
+    ta, tr = total(atual), total(ref)
+
+    def evitados(litros: float, kml: Optional[float], kml_ref: Optional[float]) -> tuple[float, Optional[str]]:
+        if not kml or not kml_ref:
+            return 0.0, "Sem km/l de referência para comparar."
+        if kml <= kml_ref:
+            return 0.0, "O km/l não melhorou em relação à referência: não há combustível evitado a certificar."
+        return litros * (kml / kml_ref - 1), None
+
+    litros_ev, motivo = evitados(ta["litros"], ta["kml"], tr["kml"])
+    ref_por_mes = {(m["mes"].year, m["mes"].month): m for m in ref}
+    serie = []
+    for m in atual:
+        r = ref_por_mes.get((m["mes"].year - 1, m["mes"].month))
+        kml = m["km_comb"] / m["litros"] if m["litros"] > 0 else None
+        kml_r = r["km_comb"] / r["litros"] if r and r["litros"] > 0 else None
+        ev, _ = evitados(m["litros"], kml, kml_r)
+        serie.append(
+            {
+                "mes": m["mes"].isoformat()[:7],
+                "litros": round(m["litros"]),
+                "km": round(m["km"]),
+                "kml": round(kml, 3) if kml else None,
+                "kml_referencia": round(kml_r, 3) if kml_r else None,
+                "co2_emitido_t": round(m["litros"] * FATOR_CO2_KG_L / 1000, 2),
+                "co2_evitado_t": round(ev * FATOR_CO2_KG_L / 1000, 2),
+            }
+        )
+
+    empresa = None
+    if f.group_id is not None:
+        g = (
+            await db.execute(text('SELECT name, corporate_name, cnpj FROM mova."group" WHERE id = :g'), {"g": f.group_id})
+        ).mappings().first()
+        empresa = dict(g) if g else None
+    # Cobertura: com menos de 80% dos dias da referência, a comparação é frágil.
+    dias_periodo = (fim - inicio).days + 1
+    dias_ref = (ref_fim - ref_inicio).days + 1
+    cobertura_ref = tr["dias"] / dias_ref if dias_ref else 0
+    return {
+        "empresa": empresa,
+        "periodo": {"inicio": inicio.isoformat(), "fim": fim.isoformat(), "dias": dias_periodo},
+        "referencia": {"inicio": ref_inicio.isoformat(), "fim": ref_fim.isoformat(), "dias": dias_ref, "cobertura": round(cobertura_ref, 3)},
+        "fator_kg_l": FATOR_CO2_KG_L,
+        "litros": round(ta["litros"]),
+        "km": round(ta["km"]),
+        "veiculos": ta["veiculos"],
+        "kml": round(ta["kml"], 3) if ta["kml"] else None,
+        "kml_referencia": round(tr["kml"], 3) if tr["kml"] else None,
+        "melhora_pct": round((ta["kml"] / tr["kml"] - 1) * 100, 2) if ta["kml"] and tr["kml"] else None,
+        "litros_evitados": round(litros_ev),
+        "co2_emitido_t": round(ta["litros"] * FATOR_CO2_KG_L / 1000, 2),
+        "co2_evitado_t": round(litros_ev * FATOR_CO2_KG_L / 1000, 2),
+        "co2_por_km_kg": round(ta["litros"] * FATOR_CO2_KG_L / ta["km"], 3) if ta["km"] else None,
+        "certificavel": litros_ev > 0 and cobertura_ref >= 0.8,
+        "motivo": motivo or (None if cobertura_ref >= 0.8 else f"A referência tem dados em só {round(cobertura_ref * 100)}% dos dias: a comparação não é confiável."),
+        "serie": serie,
     }
