@@ -25,6 +25,7 @@ Cuidados verificados nos dados (02/10/2026):
 import time
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -295,3 +296,168 @@ async def pessoa(
         "por_dia": [{"dia": d.isoformat(), "acessos": v} for d, v in sorted(por_dia.items())],
         "ultimos": [dict(r) for r in linhas[:40]],
     }
+
+
+# ---------------------------------------------------------------------------
+# Páginas da plataforma nova
+#
+# A plataforma nova avisa, a cada tela que a pessoa deixa, qual tela foi e
+# quanto tempo ficou visível. ⚠️ ARMAZENAMENTO PROVISÓRIO: o banco de produção
+# é só leitura neste projeto, então os registros ficam num SQLite local
+# (`data/acessos_paginas.sqlite`). A tabela definitiva é decisão da engenharia.
+# ---------------------------------------------------------------------------
+
+import json as _json
+import sqlite3
+import threading
+from pydantic import BaseModel, Field
+
+ARQ_PAGINAS = Path(__file__).resolve().parents[4] / "data" / "acessos_paginas.sqlite"
+_trava_paginas = threading.Lock()
+MAX_SEGUNDOS = 4 * 3600
+
+
+def _con_paginas() -> sqlite3.Connection:
+    ARQ_PAGINAS.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(ARQ_PAGINAS)
+    c.row_factory = sqlite3.Row
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS visita (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, group_id INTEGER,
+            caminho TEXT NOT NULL, titulo TEXT, entrou_em TEXT NOT NULL, segundos INTEGER NOT NULL,
+            parceiro TEXT, recebido_em TEXT NOT NULL)"""
+    )
+    c.execute("CREATE INDEX IF NOT EXISTS ix_visita_em ON visita (entrou_em)")
+    return c
+
+
+def _hora_brasilia(d: datetime) -> str:
+    """Grava em hora de Brasília, como `mova.session` (a tela compara as duas).
+    UTC−3 fixo: o Brasil não tem horário de verão desde 2019 (e o servidor
+    Windows não traz a base de fusos)."""
+    from datetime import timezone
+
+    if d.tzinfo is not None:
+        d = d.astimezone(timezone(timedelta(hours=-3))).replace(tzinfo=None)
+    return d.isoformat(timespec="seconds")
+
+
+class Visita(BaseModel):
+    caminho: str = Field(..., min_length=1, max_length=200)
+    titulo: Optional[str] = Field(None, max_length=120)
+    entrou_em: datetime
+    segundos: int = Field(..., ge=0)
+    group_id: Optional[int] = None
+    parceiro: Optional[str] = Field(None, max_length=60)
+
+
+class LoteVisitas(BaseModel):
+    visitas: list[Visita] = Field(..., max_length=50)
+
+
+@router.post("/registro", status_code=204)
+async def registrar(lote: LoteVisitas, user=Depends(get_current_user)):
+    """Qualquer usuário logado: registra as telas que ele abriu (sem conteúdo, só caminho e tempo)."""
+    agora = datetime.now().isoformat(timespec="seconds")
+    linhas = [
+        (user.user_id, v.group_id, v.caminho.split("?")[0], (v.titulo or "").strip()[:120] or None,
+         _hora_brasilia(v.entrou_em), min(v.segundos, MAX_SEGUNDOS), v.parceiro, agora)
+        for v in lote.visitas
+        if v.caminho.startswith("/")
+    ]
+    if linhas:
+        with _trava_paginas, _con_paginas() as c:
+            c.executemany(
+                "INSERT INTO visita (user_id, group_id, caminho, titulo, entrou_em, segundos, parceiro, recebido_em)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                linhas,
+            )
+    return None
+
+
+def _visitas(ini: date, fi: date) -> list[sqlite3.Row]:
+    with _con_paginas() as c:
+        return c.execute(
+            "SELECT * FROM visita WHERE entrou_em >= ? AND entrou_em < ?",
+            (ini.isoformat(), (fi + timedelta(days=1)).isoformat()),
+        ).fetchall()
+
+
+@router.get("/paginas")
+async def paginas(
+    inicio: Optional[date] = Query(None),
+    fim: Optional[date] = Query(None),
+    group_id: Optional[int] = Query(None),
+    incluir_ss: bool = Query(False),
+    user=Depends(get_current_user),
+):
+    _so_ss(user)
+    ini, fi = _periodo(inicio, fim)
+    usuarios = await _usuarios()
+    with _con_paginas() as c:
+        primeiro = c.execute("SELECT min(entrou_em) FROM visita").fetchone()[0]
+
+    def entra(r) -> bool:
+        info = usuarios.get(r["user_id"], {})
+        if not incluir_ss and info.get("ss"):
+            return False
+        return not group_id or r["group_id"] == group_id or info.get("group_id") == group_id
+
+    pag: dict[str, dict] = {}
+    por_dia: dict[str, list] = defaultdict(lambda: [0, set()])
+    pessoas_pag: dict[str, Counter] = defaultdict(Counter)
+    total = 0
+    for r in _visitas(ini, fi):
+        if not entra(r):
+            continue
+        total += 1
+        p = pag.setdefault(r["caminho"], {"caminho": r["caminho"], "titulo": r["titulo"], "visitas": 0, "pessoas": set(),
+                                         "segundos": 0, "ultimo": None})
+        p["visitas"] += 1
+        p["pessoas"].add(r["user_id"])
+        p["segundos"] += r["segundos"]
+        p["titulo"] = r["titulo"] or p["titulo"]
+        p["ultimo"] = max(filter(None, [p["ultimo"], r["entrou_em"]]))
+        d = por_dia[r["entrou_em"][:10]]
+        d[0] += 1
+        d[1].add(r["user_id"])
+        pessoas_pag[r["caminho"]][r["user_id"]] += 1
+
+    lista = []
+    for p in pag.values():
+        quem = pessoas_pag[p["caminho"]].most_common(5)
+        lista.append({
+            "caminho": p["caminho"], "titulo": p["titulo"] or p["caminho"], "visitas": p["visitas"],
+            "pessoas": len(p["pessoas"]), "tempo_medio_s": round(p["segundos"] / p["visitas"]) if p["visitas"] else 0,
+            "tempo_total_s": p["segundos"], "ultimo": p["ultimo"],
+            "quem_mais_usa": [{"user_id": u, "nome": usuarios.get(u, {}).get("nome", f"Usuário {u}"),
+                               "empresa": usuarios.get(u, {}).get("empresa"), "visitas": n} for u, n in quem],
+        })
+    lista.sort(key=lambda x: -x["visitas"])
+    return {
+        "registro_desde": primeiro,
+        "total_visitas": total,
+        "paginas": lista,
+        "por_dia": [{"dia": d, "visitas": v[0], "pessoas": len(v[1])} for d, v in sorted(por_dia.items())],
+    }
+
+
+@router.get("/paginas/pessoa/{user_id}")
+async def paginas_da_pessoa(
+    user_id: int,
+    inicio: Optional[date] = Query(None),
+    fim: Optional[date] = Query(None),
+    user=Depends(get_current_user),
+):
+    _so_ss(user)
+    ini, fi = _periodo(inicio, fim)
+    pag: dict[str, dict] = {}
+    for r in _visitas(ini, fi):
+        if r["user_id"] != user_id:
+            continue
+        p = pag.setdefault(r["caminho"], {"caminho": r["caminho"], "titulo": r["titulo"] or r["caminho"], "visitas": 0, "segundos": 0, "ultimo": None})
+        p["visitas"] += 1
+        p["segundos"] += r["segundos"]
+        p["ultimo"] = max(filter(None, [p["ultimo"], r["entrou_em"]]))
+    return {"paginas": sorted(
+        ({**p, "tempo_medio_s": round(p["segundos"] / p["visitas"])} for p in pag.values()), key=lambda x: -x["visitas"])}
