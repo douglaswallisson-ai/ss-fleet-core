@@ -49,6 +49,21 @@ SQL_POSICOES = """
 """
 
 
+# O perfil de um veículo traz mais colunas (RPM, motorista, endereço) para o
+# gráfico e para a caixa de detalhe do evento; o resumo da frota usa a leve acima.
+SQL_TRAJETO = """
+    SELECT d.unit_id, d.local_time, d.latitude::float AS lat, d.longitude::float AS lon,
+           d.speed, d.altitude, COALESCE(d.driver_id, 0) AS driver_id, d.tracker_event_id,
+           COALESCE(d.can_rpm, d.rpm)::float AS rpm, NULLIF(NULLIF(TRIM(d.driver_name), ''), 'NULL') AS motorista,
+           NULLIF(NULLIF(TRIM(d.address), ''), 'NULL') AS endereco, d.can_fuel_level_percent::float AS combustivel
+    FROM mova.dev_status_30 d
+    WHERE d.unit_id = ANY(CAST(:ids AS integer[]))
+      AND d.local_time >= :ini AND d.local_time < :fim
+      AND d.gps AND d.latitude <> 0 AND d.longitude <> 0
+    ORDER BY d.unit_id, d.local_time
+"""
+
+
 def _sem_mapa():
     if not relevo.mapa_disponivel():
         raise HTTPException(
@@ -75,7 +90,7 @@ async def trajeto(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Veículo não encontrado")
     ini = datetime.combine(dia, datetime.min.time())
     linhas = (
-        await db.execute(text(SQL_POSICOES.format(extra="")), {"ids": [unit_id], "ini": ini, "fim": ini + timedelta(days=1)})
+        await db.execute(text(SQL_TRAJETO), {"ids": [unit_id], "ini": ini, "fim": ini + timedelta(days=1)})
     ).mappings().all()
     if not linhas:
         return {"unit_id": unit_id, "dia": dia.isoformat(), "pontos": [], "resumo": None, "altitude_do_equipamento": False}
@@ -95,6 +110,7 @@ async def trajeto(
             "elevacao": _r(e),
             "altitude_gps": r["altitude"] if tem_gps and r["altitude"] else None,
             "velocidade": r["speed"],
+            "rpm": round(r["rpm"]) if r["rpm"] else None,
             "lat": r["lat"],
             "lon": r["lon"],
         }
@@ -128,11 +144,20 @@ async def trajeto(
         eventos.append(
             {
                 "hora": r["local_time"].strftime("%H:%M:%S"),
+                "em": r["local_time"].isoformat(),
                 "tipo": tipo_de[cod],
+                "cod": cod,
                 "evento": nomes.get(cod),
                 "lat": r["lat"],
                 "lon": r["lon"],
                 "velocidade": r["speed"],
+                "rpm": round(r["rpm"]) if r["rpm"] else None,
+                "motorista": r["motorista"],
+                "driver_id": r["driver_id"],
+                "endereco": r["endereco"],
+                "combustivel": r["combustivel"],
+                "altitude_gps": r["altitude"] or None,
+                "elevacao": _r(relevo.elevacao(r["lat"], r["lon"])),
                 "km": round(km_por_hora[i][1], 2) if km_por_hora else None,
             }
         )

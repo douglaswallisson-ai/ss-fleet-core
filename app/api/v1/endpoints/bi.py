@@ -167,45 +167,63 @@ async def eventos_lista(
     db: AsyncSession = Depends(get_db_read),
     current_user=Depends(require_permission("reports", "read")),
 ):
-    """Eventos de condução de um dia, um por linha, mais recentes primeiro."""
+    """Eventos de condução de um dia, um por linha, mais recentes primeiro.
+
+    Fonte: `mova.heatmap`. Ele chega com dias de atraso (em 02/10/2026 estava
+    em 25/09); para dia ainda não carregado, os eventos vêm do histórico de
+    posições (`dev_status_30`), que é tempo real — os mesmos códigos de evento.
+    """
     ids = await _veiculos(db, current_user, f)
     if not ids:
-        return {"dia": dia.isoformat(), "itens": [], "ultimo_carregado": None}
-    extra, pextra = _filtro_heatmap(f)
-    linhas = (
-        await db.execute(
-            text(
-                f"""
-                SELECT h.id, h.local_time, h.unit_id, h.label, h.label2, COALESCE(h.driver_id, 0) AS driver_id,
-                       NULLIF(NULLIF(TRIM(h.driver_name), ''), 'NULL') AS condutor, h.tracker_event_name AS evento,
-                       {CASE_TIPO} AS tipo, NULLIF(NULLIF(TRIM(h.address), ''), 'NULL') AS endereco, h.area_name AS cerca,
-                       h.latitude, h.longitude
-                FROM mova.heatmap h
-                WHERE h.unit_id = ANY(CAST(:ids AS bigint[]))
-                  AND h.tracker_event_id = ANY(CAST(:cods AS bigint[]))
-                  AND h.local_time >= :ini AND h.local_time < :fim {extra}
-                ORDER BY h.local_time DESC
-                LIMIT :limit
-                """
-            ),
-            {"ids": ids, "cods": TODOS_CODIGOS, "ini": datetime.combine(dia, datetime.min.time()),
-             "fim": datetime.combine(dia + timedelta(days=1), datetime.min.time()), "limit": limit, **pextra},
-        )
-    ).mappings().all()
-    # Até quando a tabela foi carregada para esses veículos: o heatmap chega
-    # com atraso, e "nenhum evento" num dia ainda não carregado engana.
+        return {"dia": dia.isoformat(), "itens": [], "ultimo_carregado": None, "fonte": "heatmap"}
+    ini = datetime.combine(dia, datetime.min.time())
+    fim = datetime.combine(dia + timedelta(days=1), datetime.min.time())
+    # Até quando a tabela foi carregada para esses veículos.
     ultimo = (
         await db.execute(
             text(
                 "SELECT MAX(h.local_time) FROM mova.heatmap h WHERE h.unit_id = ANY(CAST(:ids AS bigint[]))"
                 " AND h.tracker_event_id = ANY(CAST(:cods AS bigint[])) AND h.local_time >= :desde"
             ),
-            {"ids": ids, "cods": TODOS_CODIGOS, "desde": datetime.combine(dia - timedelta(days=7), datetime.min.time())},
+            {"ids": ids, "cods": TODOS_CODIGOS, "desde": datetime.combine(dia - timedelta(days=14), datetime.min.time())},
         )
     ).scalar()
+    tempo_real = ultimo is None or ultimo < fim - timedelta(minutes=5)
+    extra, pextra = _filtro_heatmap(f)
+    if not tempo_real:
+        sql = f"""
+            SELECT h.id, h.local_time, h.unit_id, h.label, h.label2, COALESCE(h.driver_id, 0) AS driver_id,
+                   NULLIF(NULLIF(TRIM(h.driver_name), ''), 'NULL') AS condutor, h.tracker_event_name AS evento,
+                   {CASE_TIPO} AS tipo, NULLIF(NULLIF(TRIM(h.address), ''), 'NULL') AS endereco, h.area_name AS cerca,
+                   h.latitude, h.longitude, NULL::numeric AS velocidade
+            FROM mova.heatmap h
+            WHERE h.unit_id = ANY(CAST(:ids AS bigint[]))
+              AND h.tracker_event_id = ANY(CAST(:cods AS bigint[]))
+              AND h.local_time >= :ini AND h.local_time < :fim {extra}
+            ORDER BY h.local_time DESC
+            LIMIT :limit"""
+    else:
+        sql = f"""
+            SELECT md5(h.unit_id::text || h.local_time::text || h.tracker_event_id::text) AS id, h.local_time, h.unit_id,
+                   tu.label, tu.label2, COALESCE(h.driver_id, 0) AS driver_id,
+                   NULLIF(NULLIF(TRIM(h.driver_name), ''), 'NULL') AS condutor, te.name AS evento,
+                   {CASE_TIPO} AS tipo, NULLIF(NULLIF(TRIM(h.address), ''), 'NULL') AS endereco, h.area_name AS cerca,
+                   h.latitude, h.longitude, h.speed AS velocidade
+            FROM mova.dev_status_30 h
+            JOIN mova.tracked_unit tu ON tu.id = h.unit_id
+            LEFT JOIN mova.tracker_event te ON te.id = h.tracker_event_id
+            WHERE h.unit_id = ANY(CAST(:ids AS bigint[]))
+              AND h.tracker_event_id = ANY(CAST(:cods AS bigint[]))
+              AND h.local_time >= :ini AND h.local_time < :fim {extra}
+            ORDER BY h.local_time DESC
+            LIMIT :limit"""
+    linhas = (
+        await db.execute(text(sql), {"ids": ids, "cods": TODOS_CODIGOS, "ini": ini, "fim": fim, "limit": limit, **pextra})
+    ).mappings().all()
     return {
         "dia": dia.isoformat(),
         "ultimo_carregado": ultimo.isoformat() if ultimo else None,
+        "fonte": "tempo_real" if tempo_real else "heatmap",
         "itens": [
             {
                 "id": r["id"],
@@ -220,6 +238,7 @@ async def eventos_lista(
                 "cerca": r["cerca"],
                 "latitude": float(r["latitude"]) if r["latitude"] is not None else None,
                 "longitude": float(r["longitude"]) if r["longitude"] is not None else None,
+                "velocidade": float(r["velocidade"]) if r["velocidade"] is not None else None,
             }
             for r in linhas
         ],
