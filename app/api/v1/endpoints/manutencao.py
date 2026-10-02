@@ -18,9 +18,16 @@ Fontes (só leitura no banco):
 ficam num SQLite local (`data/manutencao.sqlite`) — o banco de produção é só
 leitura neste projeto. A tabela definitiva é decisão da engenharia.
 
-SUPOSIÇÃO (limites dos alertas, configuráveis em LIMITES): derivados da
-distribuição real dos sinais em 02/10/2026 (1.864 veículos), não de manual
-de fabricante. Confirmar com a engenharia/oficina dos clientes.
+Limites dos alertas (configuráveis em LIMITES), pesquisa de 02/10/2026:
+- temperatura e óleo: Cummins, guia de referência L9, boletim 5676573 (2024).
+  Faixa normal do líquido de arrefecimento de 79–95 °C, máximo de 107 °C.
+  Pressão mínima do óleo de 69 kPa em marcha lenta e 207 kPa na rotação nominal;
+- bateria: um alternador de 24 V carrega entre 27 e 29 V. Em repouso, a
+  bateria de 24 V tem 25,4 V carregada e 24,4 V com 50%. No sistema de 12 V, metade.
+SUPOSIÇÃO: os limites de outras marcas (MWM, Mercedes, Scania, Volvo) são
+parecidos. Para confirmar, comparar com o manual de cada motor da frota.
+Pressão de óleo igual a 0 com o motor girando = veículo sem esse sensor (o
+motor não gira sem óleo), não alerta.
 O horímetro fica de fora dos vencimentos até a unidade ser confirmada
 (mediana 193.629 — não é hora).
 """
@@ -50,10 +57,11 @@ AVISO_KM = 1_000
 AVISO_DIAS = 15
 
 LIMITES = {
-    "temp_atencao": 100.0, "temp_critico": 105.0,          # °C
-    "oleo_min_kpa": 70.0, "oleo_rpm_min": 900.0,            # kPa, só com motor girando
-    "v24_atencao": 24.0, "v24_critico": 23.0,               # sistema 24 V (leitura > 18 V)
-    "v12_atencao": 12.0, "v12_critico": 11.5,               # sistema 12 V
+    "temp_atencao": 96.0, "temp_critico": 107.0,           # °C — acima da faixa normal / máximo Cummins
+    "oleo_min_kpa": 69.0, "oleo_rpm_min": 900.0,            # kPa, mínimo Cummins em marcha lenta
+    "rpm_ligado": 500.0,                                    # acima disso o alternador deve estar carregando
+    "v24_carga_min": 26.0, "v24_atencao": 24.4, "v24_critico": 24.0,   # sistema 24 V (leitura > 18 V)
+    "v12_carga_min": 13.0, "v12_atencao": 12.2, "v12_critico": 12.0,   # sistema 12 V
     "arla_min": 10.0,                                       # %
 }
 
@@ -179,21 +187,25 @@ def _alertas_do_veiculo(v: dict) -> list[dict]:
             a.append({"chave": "temperatura", "titulo": "Motor quente", "nivel": "atencao", "valor": f"{t:.0f} °C",
                       "detalhe": f"Temperatura em {t:.0f} °C (atenção a partir de {L['temp_atencao']:.0f} °C)."})
     o, rpm = v.get("oleo"), v.get("rpm")
-    if o is not None and rpm is not None and rpm >= L["oleo_rpm_min"] and o < L["oleo_min_kpa"]:
+    if o is not None and o > 0 and rpm is not None and rpm >= L["oleo_rpm_min"] and o < L["oleo_min_kpa"]:
         a.append({"chave": "oleo", "titulo": "Pressão de óleo baixa", "nivel": "critico", "valor": f"{o:.0f} kPa",
                   "detalhe": f"Pressão do óleo em {o:.0f} kPa com o motor a {rpm:.0f} rpm (mínimo {L['oleo_min_kpa']:.0f} kPa)."})
     tensao = v.get("voltage")
     if tensao is not None:
         if tensao > 18:
-            crit, aten, sist = L["v24_critico"], L["v24_atencao"], "24 V"
+            crit, aten, carga, sist = L["v24_critico"], L["v24_atencao"], L["v24_carga_min"], "24 V"
         else:
-            crit, aten, sist = L["v12_critico"], L["v12_atencao"], "12 V"
-        if tensao < crit:
+            crit, aten, carga, sist = L["v12_critico"], L["v12_atencao"], L["v12_carga_min"], "12 V"
+        ligado = rpm is not None and rpm >= L["rpm_ligado"]
+        if ligado and crit <= tensao < carga:
+            a.append({"chave": "bateria", "titulo": "Alternador sem carregar", "nivel": "atencao", "valor": f"{tensao:.1f} V",
+                      "detalhe": f"Tensão em {tensao:.1f} V com o motor ligado num sistema de {sist}; carregando deveria passar de {carga} V."})
+        elif tensao < crit:
             a.append({"chave": "bateria", "titulo": "Bateria/alternador", "nivel": "critico", "valor": f"{tensao:.1f} V",
                       "detalhe": f"Tensão em {tensao:.1f} V num sistema de {sist} (crítico abaixo de {crit} V)."})
-        elif tensao < aten:
+        elif not ligado and tensao < aten:
             a.append({"chave": "bateria", "titulo": "Tensão baixa", "nivel": "atencao", "valor": f"{tensao:.1f} V",
-                      "detalhe": f"Tensão em {tensao:.1f} V num sistema de {sist} (atenção abaixo de {aten} V)."})
+                      "detalhe": f"Tensão em {tensao:.1f} V num sistema de {sist} (abaixo de {aten} V a bateria parada está com menos de metade da carga)."})
     arla = v.get("arla")
     if arla is not None and arla <= 100 and arla < L["arla_min"]:
         a.append({"chave": "arla", "titulo": "ARLA 32 no fim", "nivel": "atencao", "valor": f"{arla:.0f}%",

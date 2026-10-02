@@ -13,15 +13,23 @@ SUPOSIÇÃO: a jornada pela telemetria é uma estimativa (o motorista trabalha
 antes de ligar o veículo e depois de desligar). Confirmar com o RH de cada
 cliente se vale como ponto ou só como conferência.
 
-Regras da Lei 13.103/2015 usadas (parâmetros em REGRAS, por tipo de
-operação). Confirmar a leitura com o jurídico antes de usar em autuação:
-- jornada de 8 h, com até 2 h extras (acima disso = infração);
-- carga: direção contínua de no máximo 5h30; passageiros: 4 h;
-- intervalo de refeição de pelo menos 1 h em jornada acima de 6 h;
-- interjornada de 11 h entre o fim de uma jornada e o início da seguinte;
-- hora noturna das 22 h às 5 h.
-SUPOSIÇÃO: parada de 10 min ou mais conta como pausa (interrompe a direção
-contínua); intervalo de 1 h ou mais conta como refeição.
+Regras usadas (parâmetros em REGRAS, por tipo de operação). Pesquisa de
+02/10/2026; confirmar com o jurídico antes de usar em autuação:
+- CLT art. 235-C (Lei 13.103/2015): jornada de 8 h + até 2 h extras (até 4 h
+  com convenção/acordo coletivo); intervalo de refeição de no mínimo 1 h;
+- CTB art. 67-C caput: no máximo 5h30 de direção ininterrupta (carga e
+  passageiros);
+- CTB art. 67-C §1º: carga = 30 min de descanso dentro de cada 6 h de direção;
+  §1º-A: passageiros = 30 min a cada 4 h. Os dois podem ser fracionados, então
+  somamos as pausas até completar 30 min;
+- interjornada de 11 h ININTERRUPTAS em 24 h: o STF (ADI 5322, 30/06/2023)
+  derrubou o fracionamento e a coincidência com as paradas do CTB, e também
+  passou a contar o tempo de espera como jornada. Por isso a jornada vai do
+  primeiro ao último trecho, sem descontar paradas;
+- CLT art. 73: hora noturna das 22 h às 5 h.
+SUPOSIÇÃO: a lei não diz o tamanho mínimo de cada fração do descanso. Aqui,
+parada de 10 min ou mais conta como pausa; intervalo de 1 h ou mais conta como
+refeição.
 
 ⚠️ ARMAZENAMENTO PROVISÓRIO: escala planejada e justificativas ficam num
 SQLite local (`data/jornada.sqlite`) — o banco de produção é só leitura.
@@ -50,8 +58,11 @@ _trava = threading.Lock()
 _CACHE: dict[tuple, tuple[float, object]] = {}
 
 REGRAS = {
-    "carga": {"jornada_h": 8, "extra_max_h": 2, "direcao_continua_min": 330, "refeicao_min": 60, "interjornada_h": 11},
-    "passageiros": {"jornada_h": 8, "extra_max_h": 2, "direcao_continua_min": 240, "refeicao_min": 60, "interjornada_h": 11},
+    # descanso_a_cada_min: direção somada que exige 30 min de descanso (fracionável) — CTB 67-C §1º e §1º-A.
+    "carga": {"jornada_h": 8, "extra_max_h": 2, "extra_convencao_h": 4, "direcao_continua_min": 330,
+              "descanso_a_cada_min": 330, "descanso_min": 30, "refeicao_min": 60, "interjornada_h": 11},
+    "passageiros": {"jornada_h": 8, "extra_max_h": 2, "extra_convencao_h": 4, "direcao_continua_min": 330,
+                    "descanso_a_cada_min": 240, "descanso_min": 30, "refeicao_min": 60, "interjornada_h": 11},
 }
 PAUSA_MIN = 10
 JORNADA_REFEICAO_H = 6
@@ -143,7 +154,19 @@ def _apurar(trechos: list[dict], regra: dict, fim_anterior: Optional[datetime]) 
     bloco_ini = trechos[0]["start_time"]
     bloco_fim = trechos[0]["end_time"]
     maior_bloco = 0.0
+    # Descanso fracionado: direção somada até juntar 30 min de pausas.
+    dir_acum = pausa_acum = 0.0
+    maior_sem_descanso = 0.0
+    ult_fim: Optional[datetime] = None
     for t in trechos:
+        if ult_fim is not None and (t["start_time"] - ult_fim).total_seconds() / 60 >= PAUSA_MIN:
+            pausa_acum += (t["start_time"] - ult_fim).total_seconds() / 60
+            if pausa_acum >= regra["descanso_min"]:
+                dir_acum = pausa_acum = 0.0
+        ini_util = t["start_time"] if ult_fim is None else max(t["start_time"], ult_fim)
+        dir_acum += max(0.0, (t["end_time"] - ini_util).total_seconds() / 60)
+        maior_sem_descanso = max(maior_sem_descanso, dir_acum)
+        ult_fim = t["end_time"] if ult_fim is None else max(ult_fim, t["end_time"])
         if t["start_time"] > bloco_fim and (t["start_time"] - bloco_fim).total_seconds() / 60 >= PAUSA_MIN:
             pausas.append({"de": bloco_fim.strftime("%H:%M"), "ate": t["start_time"].strftime("%H:%M"),
                            "min": round((t["start_time"] - bloco_fim).total_seconds() / 60)})
@@ -161,21 +184,26 @@ def _apurar(trechos: list[dict], regra: dict, fim_anterior: Optional[datetime]) 
     infracoes = []
     if maior_bloco > regra["direcao_continua_min"]:
         infracoes.append({"regra": "direcao_continua", "titulo": "Direção contínua acima do limite",
-                          "detalhe": f"{_fmt(maior_bloco)} sem pausa de {PAUSA_MIN} min (limite {_fmt(regra['direcao_continua_min'])})."})
+                          "detalhe": f"{_fmt(maior_bloco)} sem pausa de {PAUSA_MIN} min (limite {_fmt(regra['direcao_continua_min'])}, CTB art. 67-C)."})
+    if maior_sem_descanso > regra["descanso_a_cada_min"] and maior_bloco <= regra["direcao_continua_min"]:
+        infracoes.append({"regra": "descanso", "titulo": "Descanso de 30 min não cumprido",
+                          "detalhe": f"{_fmt(maior_sem_descanso)} de direção sem somar {regra['descanso_min']} min de descanso "
+                                     f"(exigido a cada {_fmt(regra['descanso_a_cada_min'])}, CTB art. 67-C §1º)."})
     if jornada > limite_jornada + regra["extra_max_h"] * 60:
         infracoes.append({"regra": "jornada", "titulo": "Jornada acima do permitido",
-                          "detalhe": f"{_fmt(jornada)} de jornada (máximo {regra['jornada_h'] + regra['extra_max_h']} h com extras)."})
+                          "detalhe": f"{_fmt(jornada)} de jornada (máximo {regra['jornada_h'] + regra['extra_max_h']} h com extras; {regra['jornada_h'] + regra['extra_convencao_h']} h se houver convenção coletiva)."})
     if jornada > JORNADA_REFEICAO_H * 60 and maior_pausa < regra["refeicao_min"]:
         infracoes.append({"regra": "refeicao", "titulo": "Sem intervalo de refeição",
                           "detalhe": f"Maior pausa de {maior_pausa} min numa jornada de {_fmt(jornada)} (mínimo {regra['refeicao_min']} min)."})
     if interjornada is not None and interjornada < regra["interjornada_h"] * 60:
         infracoes.append({"regra": "interjornada", "titulo": "Interjornada curta",
-                          "detalhe": f"Só {_fmt(interjornada)} de descanso desde o fim da jornada anterior (mínimo {regra['interjornada_h']} h)."})
+                          "detalhe": f"Só {_fmt(interjornada)} de descanso desde o fim da jornada anterior (mínimo {regra['interjornada_h']} h seguidas)."})
     veics = sorted({" · ".join(x for x in (t["prefixo"], t["placa"]) if x and x.strip()) for t in trechos})
     return {
         "inicio": ini.isoformat(timespec="minutes"), "fim": fim.isoformat(timespec="minutes"),
         "jornada_h": _h(jornada), "direcao_h": _h(direcao), "extra_h": _h(extra),
         "noturno_h": _h(_noturno_min(ini, fim)), "maior_direcao_continua_min": round(maior_bloco),
+        "maior_direcao_sem_descanso_min": round(maior_sem_descanso),
         "maior_pausa_min": maior_pausa, "pausas": pausas[:30], "interjornada_h": _h(interjornada) if interjornada is not None else None,
         "veiculos": veics, "infracoes": infracoes,
     }

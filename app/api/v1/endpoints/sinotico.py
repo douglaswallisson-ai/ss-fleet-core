@@ -20,8 +20,14 @@ Fontes e regras:
 - Intervalo até o da frente: distância na régua ÷ velocidade média da viagem
   de referência.
 
-SUPOSIÇÃO: "colado" = intervalo menor que 40% do intervalo médio da linha;
-"buraco" = maior que 160%. Confirmar com a operação do cliente.
+Critério de espaçamento: TCQSM (Transit Capacity and Quality of Service
+Manual, TCRP Report 165, 3ª ed., cap. 5). Um ônibus está fora do intervalo
+quando o seu intervalo difere do previsto em mais da metade. Aqui:
+"colado" < 50% do intervalo médio; "buraco" > 150%. O nível de serviço vem do
+coeficiente de variação dos intervalos (Cvh): A ≤ 0,21, B ≤ 0,30, C ≤ 0,39,
+D ≤ 0,52, E ≤ 0,74, F acima. O manual o aplica a linhas de 10 min ou menos.
+SUPOSIÇÃO: na falta da tabela horária, o intervalo médio atual dos carros faz
+o papel do intervalo programado.
 Todos os horários são hora local (as três tabelas gravam em hora de Brasília).
 """
 
@@ -40,8 +46,9 @@ router = APIRouter()
 
 JANELA_ATIVO_MIN = 40
 RAIO_ROTA_M = 300
-COLADO = 0.4
-BURACO = 1.6
+COLADO = 0.5
+BURACO = 1.5
+NIVEIS_CVH = [(0.21, "A"), (0.30, "B"), (0.39, "C"), (0.52, "D"), (0.74, "E")]
 _CACHE: dict[tuple, tuple[float, object]] = {}
 
 
@@ -278,6 +285,8 @@ async def sinotico(
             o["frente_min"] = round(o["frente_m"] / vel / 60, 1) if frente and vel else None
         gaps = [o["frente_min"] for o in na_rota if o.get("frente_min") is not None]
         media = sum(gaps) / len(gaps) if gaps else None
+        cvh = (math.sqrt(sum((g - media) ** 2 for g in gaps) / (len(gaps) - 1)) / media) if media and len(gaps) >= 3 else None
+        nivel = None if cvh is None else next((n for lim, n in NIVEIS_CVH if cvh <= lim), "F")
         for o in na_rota:
             g = o.get("frente_min")
             o["espacamento"] = (
@@ -295,5 +304,7 @@ async def sinotico(
             "intervalo_medio_min": round(media, 1) if media else None,
             "maior_buraco_min": max(gaps) if gaps else None,
             "colados": sum(1 for o in na_rota if o.get("espacamento") == "colado"),
+            "cvh": round(cvh, 2) if cvh is not None else None,
+            "nivel_servico": nivel,
         })
     return {"linha": linha, "group_id": group_id, "atualizado": date.today().isoformat(), "sentidos": sentidos}
