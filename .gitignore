@@ -11,3 +11,4 @@ data/relevo/
 
 # Plano de viagem (Escala de Viagem) - armazenamento provisorio local
 data/escala_viagem.sqlite
+data/suporte.sqlite
