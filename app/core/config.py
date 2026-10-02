@@ -81,6 +81,13 @@ class Settings(BaseSettings):
             "NAO e o mesmo valor de SECRET_KEY (esse assina os JWTs de sessao)."
         )
     )
+    EMBED_PARCEIROS: str = Field(
+        default="",
+        description=(
+            "Parceiros que embutem as telas no sistema deles (JSON: id, nome, segredo, "
+            "contas, origens, marca). Ver app/api/v1/endpoints/embed.py."
+        ),
+    )
     SSO_TICKET_MAX_AGE_SECONDS: int = Field(
         default=60,
         description="Janela maxima de validade de um ticket de SSO handoff, em segundos"
