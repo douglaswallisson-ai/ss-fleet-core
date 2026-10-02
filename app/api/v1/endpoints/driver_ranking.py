@@ -26,6 +26,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
+
+from app.core import combustivel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_read
@@ -140,8 +142,8 @@ async def ranking_motoristas(
                        SUM(h.time_traveled_hist) / 3600.0 AS horas,
                        SUM(h.distance_traveled_hist) / 1000.0 AS km,
                        -- Combustível negativo vira 0 na carga do BI.
-                       SUM(GREATEST(h.used_fuel_hist, 0)) / 1000.0 AS litros,
-                       SUM(CASE WHEN h.used_fuel_hist > 0 THEN h.distance_traveled_hist ELSE 0 END)
+                       SUM({combustivel.litros_ml()}) / 1000.0 AS litros,
+                       SUM({combustivel.km_com_combustivel_m()})
                            / 1000.0 AS km_com_combustivel,
                        SUM(COALESCE(h.count_acel_excess, 0)) AS acel,
                        SUM(COALESCE(h.count_break_excess, 0)) AS freada,

@@ -23,6 +23,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
+
+from app.core import combustivel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_read
@@ -125,9 +127,8 @@ async def serie_diaria(
                     f"""
                     SELECT h.dt AS dia,
                            SUM(h.distance_traveled_hist) / 1000.0 AS km,
-                           SUM(CASE WHEN h.used_fuel_hist > 0 AND h.used_fuel_hist < 500000
-                                    THEN h.distance_traveled_hist ELSE 0 END) / 1000.0 AS km_filtrado,
-                           SUM(GREATEST(COALESCE(h.used_fuel_hist, 0), 0)) / 1000.0 AS litros,
+                           SUM({combustivel.km_com_combustivel_m()}) / 1000.0 AS km_filtrado,
+                           SUM({combustivel.litros_ml()}) / 1000.0 AS litros,
                            SUM(h.time_traveled_hist) / 3600.0 AS horas,
                            SUM(CASE WHEN COALESCE(h.driver_id, 0) = 0 THEN h.time_traveled_hist ELSE 0 END)
                                / 3600.0 AS horas_sem_condutor,
@@ -139,7 +140,7 @@ async def serie_diaria(
                                AS velocidade,
                            SUM(COALESCE(h.count_speed_excess_wet_l1, 0) + COALESCE(h.count_speed_excess_wet_l2, 0)
                              + COALESCE(h.count_speed_excess_wet_l3, 0)) AS velocidade_chuva,
-                           SUM(CASE WHEN h.used_fuel_hist > 0 THEN h.distance_traveled_hist ELSE 0 END) / 1000.0
+                           SUM({combustivel.km_com_combustivel_m()}) / 1000.0
                                AS km_com_combustivel,
                            COUNT(DISTINCT h.unit_id) AS veiculos,
                            COUNT(DISTINCT NULLIF(COALESCE(h.driver_id, 0), 0)) AS motoristas
@@ -287,7 +288,7 @@ async def ocioso(
             text(
                 f"""
                 SELECT h.unit_id, COALESCE(h.driver_id, 0) AS driver_id,
-                       SUM(GREATEST(COALESCE(h.used_fuel_hist, 0), 0)) / 1000.0 AS litros,
+                       SUM({combustivel.litros_ml()}) / 1000.0 AS litros,
                        SUM(h.time_traveled_hist) AS segundos
                 FROM mova.con_driver_h_km h
                 WHERE h.dt >= :ini AND h.dt <= :fim {esc_h}
@@ -412,7 +413,7 @@ async def roi_contrato(
             await db.execute(
                 text(
                     f"""
-                    SELECT h.group_id, SUM(GREATEST(h.used_fuel_hist, 0)) / 1000.0
+                    SELECT h.group_id, SUM({combustivel.litros_ml()}) / 1000.0
                     FROM mova.con_driver_h_km h
                     WHERE h.dt >= :ini AND h.dt <= :fim AND h.group_id = ANY(CAST(:ids AS integer[])) {esc}
                     GROUP BY 1
@@ -503,8 +504,8 @@ async def co2_evitado(
                 text(
                     f"""
                     SELECT date_trunc('month', h.dt)::date AS mes,
-                           SUM(GREATEST(h.used_fuel_hist, 0)) / 1000.0 AS litros,
-                           SUM(CASE WHEN h.used_fuel_hist > 0 THEN h.distance_traveled_hist ELSE 0 END) / 1000.0 AS km_comb,
+                           SUM({combustivel.litros_ml()}) / 1000.0 AS litros,
+                           SUM({combustivel.km_com_combustivel_m()}) / 1000.0 AS km_comb,
                            SUM(h.distance_traveled_hist) / 1000.0 AS km,
                            COUNT(DISTINCT h.unit_id) AS veiculos,
                            COUNT(DISTINCT h.dt) AS dias

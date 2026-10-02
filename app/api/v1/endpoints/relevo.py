@@ -18,6 +18,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
+
+from app.core import combustivel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.bi import TIPOS_EVENTO, _veiculos
@@ -388,8 +390,8 @@ async def resumo(
             text(
                 f"""
                 SELECT h.unit_id, COALESCE(h.driver_id, 0) AS driver_id, MAX(h.label) AS placa, MAX(h.driver) AS motorista,
-                       SUM(GREATEST(h.used_fuel_hist, 0)) / 1000.0 AS litros,
-                       SUM(CASE WHEN h.used_fuel_hist > 0 THEN h.distance_traveled_hist ELSE 0 END) / 1000.0 AS km_comb
+                       SUM({combustivel.litros_ml()}) / 1000.0 AS litros,
+                       SUM({combustivel.km_com_combustivel_m()}) / 1000.0 AS km_comb
                 FROM mova.con_driver_h_km h
                 WHERE h.dt >= :ini AND h.dt <= :fim {esc}
                 GROUP BY 1, 2
