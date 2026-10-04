@@ -460,6 +460,121 @@ TIPOS: dict[str, Tipo] = {
 }
 
 
+# ------------------------------------------------------------- fretamento
+# Regras do sistema atual (plataforma_web: passengercontroller, routecontroller,
+# costcentercontroller, linegroupcontroller, buslineshiftshiftcontroller,
+# seat_layoutcontroller), lidas em 04/10/2026.
+
+SQL_PASSAGEIRO = """SELECT p.id, p.name AS nome, p.cpf, p.matricula, p.cod AS cartao, p.company AS empresa,
+    p.management AS gerencia, p.general_management AS gerencia_geral, p.cost_center_id, cc.name AS centro_custo,
+    p.subgroup_id, p.shift_id AS turno_id, p.seat_number AS assento, p.hour_ini AS hora_inicio, p.hour_end AS hora_fim,
+    p.rua, p.numero, p.bairro, p.cidade, p.cep, p.observation AS observacao, p.inactivity AS inativo,
+    (SELECT count(*) FROM mova.buss_line_shift_passenger blsp WHERE blsp.passenger_id = p.id AND blsp.status = 1) AS viagens,
+    pi.date_ini AS inatividade_inicio, pi.date_end AS inatividade_fim
+    FROM mova.passenger p LEFT JOIN mova.cost_center cc ON cc.id = p.cost_center_id
+    LEFT JOIN LATERAL (SELECT date_ini, date_end FROM mova.passenger_inactivity i WHERE i.passenger_id = p.id AND i.status = 1
+                       ORDER BY i.date_ini DESC LIMIT 1) pi ON true
+    WHERE p.group_id = :g AND p.status = 1"""
+
+
+def _v_passageiro(d, ctx):
+    _exigir(d, ("nome", "Nome"), ("cost_center_id", "Centro de custo"))
+    if d.get("cpf"):
+        cpf = _so_digitos(d["cpf"])
+        if len(cpf) != 11:
+            raise Erro("cpf", "CPF deve ter 11 dígitos.")
+        d["cpf"] = cpf
+    if d.get("cep") and len(_so_digitos(d["cep"])) != 8:
+        raise Erro("cep", "CEP deve ter 8 dígitos.")
+    if d.get("hora_inicio") and d.get("hora_fim") and str(d["hora_fim"]) <= str(d["hora_inicio"]):
+        raise Erro("hora_fim", "O horário final deve ser depois do inicial.")
+    if d.get("inatividade_inicio") and d.get("inatividade_fim") and str(d["inatividade_fim"]) < str(d["inatividade_inicio"]):
+        raise Erro("inatividade_fim", "O fim da inatividade deve ser depois do início.")
+
+
+def _u_passageiro(d):
+    return [("cpf", "Já existe um passageiro com este CPF.", lambda r: _so_digitos(r.get("cpf")) or None),
+            ("cartao", "Este código de cartão (RFID) já está com outro passageiro.", lambda r: str(r.get("cartao") or "").strip() or None)]
+
+
+SQL_CENTRO_CUSTO = """SELECT cc.id, cc.name AS nome, cc.integration_id AS codigo_integracao,
+    (SELECT count(*) FROM mova.passenger p WHERE p.cost_center_id = cc.id AND p.status = 1) AS passageiros,
+    (SELECT count(*) FROM mova.buss_line bl WHERE bl.cost_center_id = cc.id AND bl.status = 1) AS linhas
+    FROM mova.cost_center cc WHERE cc.group_id = :g AND cc.status = 1"""
+
+
+def _v_centro_custo(d, ctx):
+    _exigir(d, ("nome", "Nome do centro de custo"))
+
+
+async def _excluir_centro_custo(row, ctx):
+    if int(row.get("passageiros") or 0) or int(row.get("linhas") or 0):
+        return f"Há {row.get('passageiros') or 0} passageiro(s) e {row.get('linhas') or 0} linha(s) neste centro de custo. Mova-os antes de excluir."
+    return None
+
+
+SQL_TURNO = """SELECT s.id, s.name AS nome,
+    (SELECT count(*) FROM mova.passenger p WHERE p.shift_id = s.id AND p.status = 1) AS passageiros
+    FROM mova.bus_line_shift_shift s WHERE s.group_id = :g AND s.status = 1"""
+
+
+def _v_turno(d, ctx):
+    _exigir(d, ("nome", "Nome do turno"))
+
+
+SQL_GRUPO_LINHAS = """SELECT lg.id, lg.name AS nome, lg.lines AS linhas, lg.subgroup_id
+    FROM mova.line_group lg WHERE lg.group_id = :g AND lg.status = 1"""
+
+
+def _v_grupo_linhas(d, ctx):
+    _exigir(d, ("nome", "Nome do grupo de linhas"))
+    if not d.get("linhas"):
+        raise Erro("linhas", "Escolha pelo menos uma linha.")
+
+
+SQL_ROTA = """SELECT r.id, r.name AS nome, r.color AS cor, r.description AS descricao, r.speed AS velocidade,
+    r.cost_center_id, cc.name AS centro_custo, r.total_point AS pontos_total,
+    round((ST_Length(g.geo::geography) / 1000)::numeric, 1) AS km,
+    ST_AsGeoJSON(ST_Simplify(g.geo, 0.0002))::text AS trajeto_geojson
+    FROM mova.route r LEFT JOIN mova.cost_center cc ON cc.id = r.cost_center_id
+    -- O sistema atual grava a rota com X = latitude (igual às cercas). No Brasil a
+    -- latitude nunca fica abaixo de -34, então X < -34 indica que já está em lng/lat.
+    CROSS JOIN LATERAL (SELECT CASE WHEN ST_X(ST_StartPoint(r.route)) < -34 THEN r.route
+                                    ELSE ST_FlipCoordinates(r.route) END AS geo) g
+    WHERE r.group_id = :g AND r.status = 1"""
+
+
+def _v_rota(d, ctx):
+    _exigir(d, ("nome", "Nome da rota"))
+    d.setdefault("cor", "#0000FF")
+    if not 0 <= int(_num(d.get("velocidade")) or 0) <= 300:
+        raise Erro("velocidade", "Velocidade entre 0 e 300 km/h.")
+
+
+SQL_LAYOUT = """SELECT l.id, l.name AS nome, l.qtd AS assentos, l.description AS descricao, l.cost_center_id, l.layout AS imagem
+    FROM mova.bls_seat_layout l WHERE l.group_id = :g AND l.status = 1"""
+
+
+def _v_layout(d, ctx):
+    _exigir(d, ("nome", "Nome do layout"), ("assentos", "Quantidade de assentos"))
+    if not 1 <= int(_num(d["assentos"]) or 0) <= 100:
+        raise Erro("assentos", "Quantidade de assentos entre 1 e 100.")
+    img = d.get("imagem")
+    if img and len(str(img)) > 1_500_000:
+        raise Erro("imagem", "A imagem do layout deve ter no máximo 1 MB.")
+
+
+TIPOS.update({
+    "passageiro": Tipo("Passageiro", SQL_PASSAGEIRO, _v_passageiro, _u_passageiro),
+    "centro_custo": Tipo("Centro de custo", SQL_CENTRO_CUSTO, _v_centro_custo, _u_nome("Já existe um centro de custo com este nome."),
+                         pode_excluir=_excluir_centro_custo),
+    "turno": Tipo("Turno", SQL_TURNO, _v_turno, _u_nome("Já existe um turno com este nome.")),
+    "grupo_linhas": Tipo("Grupo de linhas", SQL_GRUPO_LINHAS, _v_grupo_linhas, _u_nome("Já existe um grupo de linhas com este nome.")),
+    "rota": Tipo("Rota", SQL_ROTA, _v_rota),
+    "layout_assentos": Tipo("Layout de assentos", SQL_LAYOUT, _v_layout, _u_nome("Já existe um layout com este nome.")),
+})
+
+
 def _tipo(t: str) -> Tipo:
     if t not in TIPOS:
         raise HTTPException(404, "Cadastro desconhecido.")
@@ -499,6 +614,14 @@ async def _banco(tipo: str, g: int) -> list[dict]:
                 except (ValueError, KeyError, IndexError, TypeError):
                     r["pontos"] = []
             r.pop("geometria", None)
+    if tipo == "rota":
+        for r in linhas:
+            try:
+                gj = json.loads(r.pop("trajeto_geojson") or "null")
+                coords = gj["coordinates"] if gj and gj["type"] == "LineString" else []
+                r["trajeto"] = [[round(c[1], 6), round(c[0], 6)] for c in coords]
+            except (ValueError, KeyError, TypeError):
+                r["trajeto"] = []
     _CACHE[k] = (time.time(), linhas)
     return linhas
 
@@ -693,6 +816,10 @@ async def opcoes(group_id: int = Query(...), user=Depends(require_permission("re
         "dispositivos": [{"id": x["origem_id"] or x["id"], "nome": f"{x.get('identificador')} ({x.get('modelo') or '—'})", "placa": x.get("placa")}
                          for x in await _lista("dispositivo", group_id)],
         "account_id": acc,
+        "centros_custo": [{"id": x["origem_id"] or x["id"], "nome": x["nome"]} for x in await _lista("centro_custo", group_id)],
+        "turnos": [{"id": x["origem_id"] or x["id"], "nome": x["nome"]} for x in await _lista("turno", group_id)],
+        "linhas": [{"id": x["origem_id"] or x["id"], "nome": " · ".join(v for v in (x.get("nome"), x.get("descricao")) if v)}
+                   for x in await _lista("linha", group_id)],
     }
     _CACHE[k] = (time.time(), r)
     return r
