@@ -276,3 +276,129 @@ async def distancia_horimetro(group_id: int = Query(...), inicio: date = Query(.
     r = {"dias": dias, "descartes": descartes}
     _CACHE[k] = (time.time(), r)
     return r
+
+
+# ------------------------------------------------- configurações do veículo
+# reportconfcar: as chaves de `device_config` do equipamento principal de cada
+# veículo, uma coluna por chave. As mais consultadas vêm primeiro.
+CHAVES_PRINCIPAIS = ["FW", "script", "biblioteca", "modelPrefix", "protocol", "imei", "iccid", "calibration_factor",
+                     "rpm_verde1", "rpm_verde2", "rpm_amarela", "rpm_vermelha", "rpm_extra", "rpm_parado_motor_lig",
+                     "rpm_parado_acel", "rpm_batendo", "rpm_inercia", "rpm_turbo", "rpm_mov_s_tracao",
+                     "vel_verdes", "vel_batendo", "vel_mov_s_tracao"]
+
+
+@router.get("/configuracoes")
+async def configuracoes(group_id: int = Query(...), user=Depends(require_permission("reports", "read"))):
+    _grupo_ok(user, group_id)
+    k = ("cfg", group_id)
+    if (hit := _cache(k, None)) is not None:
+        return hit
+    rows = await _ler("""SELECT tu.id AS unit_id, tu.label AS placa, tu.label2 AS prefixo, sg.name AS unidade, dv.identifier AS equipamento,
+            dm.name AS modelo, dc.key AS chave, dc.value AS valor, dc.date_modif AS alterado_em
+        FROM mova.tracked_unit tu
+        JOIN mova.tracked_unit_device tud ON tud.tracked_unit_id = tu.id AND tud.status = 1 AND tud.device_primary = 1
+        JOIN mova.device dv ON dv.id = tud.device_id
+        LEFT JOIN mova.device_model dm ON dm.id = dv.device_model_id
+        LEFT JOIN mova.subgroup sg ON sg.id = tu.subgroup_id
+        LEFT JOIN mova.device_config dc ON dc.device_id = dv.id AND dc.key NOT IN ('', 'label', 'label2')
+        WHERE tu.group_id = :g AND tu.status = 1
+        ORDER BY tu.label""", {"g": group_id})
+    veics: dict[int, dict] = {}
+    contagem: dict[str, int] = {}
+    for r in rows:
+        v = veics.setdefault(r["unit_id"], {"unit_id": r["unit_id"], "placa": r["placa"], "prefixo": r["prefixo"], "unidade": r["unidade"],
+                                            "equipamento": r["equipamento"], "modelo": r["modelo"], "config": {}, "alterado_em": None})
+        if r["chave"]:
+            v["config"][r["chave"]] = r["valor"]
+            contagem[r["chave"]] = contagem.get(r["chave"], 0) + 1
+            if r["alterado_em"] and (not v["alterado_em"] or r["alterado_em"] > v["alterado_em"]):
+                v["alterado_em"] = r["alterado_em"]
+    chaves = [c for c in CHAVES_PRINCIPAIS if c in contagem] + sorted(c for c in contagem if c not in CHAVES_PRINCIPAIS)
+    r = {"veiculos": list(veics.values()), "chaves": chaves, "principais": [c for c in CHAVES_PRINCIPAIS if c in contagem]}
+    _CACHE[k] = (time.time(), r)
+    return r
+
+
+# --------------------------------------------------------- odômetro travado
+# Regra da aba "Odômetro Travado" do Painel de Calibração (DS-1533), só leitura:
+# nas últimas 24 h, >= 30 leituras, um único valor de odômetro, todas com a
+# marcação de qualidade diferente de "ok" e velocidade máxima acima de 20.
+# Travado em 0 só conta se o equipamento já mandou odômetro > 0 em 30 dias.
+# Corrigível: as 5 leituras brutas mais recentes (24 h) existem, nunca caem,
+# variam e terminam acima do valor travado. A correção (procedure
+# fix_stuck_odometers no banco principal) continua no sistema atual.
+
+@router.get("/odometro-travado")
+async def odometro_travado(group_id: int = Query(...), user=Depends(require_permission("reports", "read"))):
+    _grupo_ok(user, group_id)
+    k = ("odo", group_id)
+    if (hit := _cache(k, None)) is not None:
+        return hit
+    travados = await _ler("""SELECT d.unit_id, max(tu.label) AS placa, max(tu.label2) AS prefixo, min(d.odom) AS odometro_travado,
+            count(*) AS leituras, max(d.speed) AS vel_max, max(d.local_time) AS ultima, max(d.odom_quality_flag) AS marcacao
+        FROM mova.dev_status_30 d JOIN mova.tracked_unit tu ON tu.id = d.unit_id
+        WHERE tu.group_id = :g AND tu.status = 1 AND d.local_time >= now() - interval '24 hours'
+        GROUP BY d.unit_id
+        HAVING count(*) >= 30 AND count(DISTINCT d.odom) = 1 AND bool_and(coalesce(d.odom_quality_flag, '') <> 'ok') AND max(d.speed) > 20""",
+                             {"g": group_id})
+    out = []
+    for t in travados:
+        u = t["unit_id"]
+        brutos = await _ler("""SELECT odom_raw FROM mova.dev_status_raw WHERE unit_id = :u AND local_time >= now() - interval '24 hours'
+                               ORDER BY local_time DESC LIMIT 5""", {"u": u})
+        if not t["odometro_travado"]:
+            ja_teve = await _ler("""SELECT 1 FROM mova.dev_status_raw WHERE unit_id = :u AND local_time >= now() - interval '30 days'
+                                    AND odom_raw > 0 LIMIT 1""", {"u": u})
+            if not ja_teve:
+                continue  # sem sensor de odômetro: não é problema real
+        vals = [float(b["odom_raw"] or 0) for b in reversed(brutos)]
+        corrigivel = (len(vals) == 5 and all(b >= a for a, b in zip(vals, vals[1:])) and len(set(vals)) > 1
+                      and vals[-1] > float(t["odometro_travado"] or 0))
+        log = await _ler("""SELECT status, applied_at, confirmed_at FROM mova.odometer_stall_fix_log WHERE unit_id = :u
+                            ORDER BY applied_at DESC LIMIT 1""", {"u": u})
+        out.append({**t, "odometro_travado_km": round(float(t["odometro_travado"] or 0) / 1000, 1),
+                    "odometro_bruto_km": round(vals[-1] / 1000, 1) if vals else None,
+                    "situacao": "corrigivel" if corrigivel else "nao_corrigivel",
+                    "ultima_correcao": log[0] if log else None})
+    r = {"veiculos": out, "verificado_em": datetime.now().isoformat(timespec="minutes")}
+    _CACHE[k] = (time.time(), r)
+    return r
+
+
+# ------------------------------------------------------------ SLA de paradas
+# reportslastops: o sistema atual lê de uma API externa; os dados são os de
+# `buss_line_shift_stops` (horário programado e realizado de cada ponto de cada
+# viagem). SUPOSIÇÃO: "no horário" = até 5 min de diferença para mais ou para
+# menos (a tolerância padrão das unidades). Confirmar com o relatório antigo.
+TOLERANCIA_MIN = 5
+
+
+@router.get("/sla-paradas")
+async def sla_paradas(group_id: int = Query(...), inicio: date = Query(...), fim: date = Query(...),
+                      user=Depends(require_permission("reports", "read"))):
+    p = _params(user, group_id, inicio, fim, 31)
+    k = ("sla", group_id, inicio, fim)
+    if (hit := _cache(k, None)) is not None:
+        return hit
+    linhas = await _ler(f"""SELECT c.id AS viagem_id, c.local_time_ini::date AS dia, c.buss_line_name AS linha, c.buss_line_shift_tag AS tabela,
+            c.buss_line_cost_center_name AS centro_custo, c.unit_label AS veiculo, s.ordem, s.poi_name AS ponto, s.schedule_time AS programado,
+            s.real_time AS realizado,
+            CASE WHEN s.real_time IS NOT NULL THEN
+              round(extract(epoch FROM s.real_time - (c.local_time_ini::date + s.schedule_time)) / 60) END AS atraso_min
+        FROM mova.buss_line_shift_stops s JOIN mova.con_status_buss_line c ON c.id = s.route_id
+        WHERE c.group_id = :g AND c.local_time_ini >= :ini AND c.local_time_ini < :fim AND s.schedule_time IS NOT NULL
+        ORDER BY c.local_time_ini DESC, c.id, s.ordem LIMIT {LINHAS_MAX * 4}""", p)
+    tol = TOLERANCIA_MIN
+    por_linha: dict[str, dict] = {}
+    for l in linhas:
+        a = l["atraso_min"]
+        l["situacao"] = "nao_passou" if a is None else "no_horario" if abs(a) <= tol else "adiantado" if a < 0 else "atrasado"
+        s = por_linha.setdefault(l["linha"] or "—", {"linha": l["linha"] or "—", "pontos": 0, "no_horario": 0, "atrasado": 0, "adiantado": 0, "nao_passou": 0})
+        s["pontos"] += 1
+        s[l["situacao"]] += 1
+    resumo = sorted(por_linha.values(), key=lambda s: s["linha"])
+    for s in resumo:
+        s["sla"] = round(100 * s["no_horario"] / s["pontos"]) if s["pontos"] else None
+    r = {"linhas": linhas, "por_linha": resumo, "tolerancia_min": tol, "cortado": len(linhas) >= LINHAS_MAX * 4}
+    _CACHE[k] = (time.time(), r)
+    return r
