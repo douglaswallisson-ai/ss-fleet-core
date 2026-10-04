@@ -82,6 +82,65 @@ class Pedido(BaseModel):
     tarifa_eixo: Optional[float] = Field(None, ge=0)
     kml: Optional[float] = Field(None, gt=0, le=30)
     preco_litro: Optional[float] = Field(None, gt=0, le=20)
+    # Rota cadastrada (fretamento): traçado real [[lat, lng], ...] e o id em
+    # mova.route, para o tempo vir das viagens que já rodaram nela.
+    trajeto: Optional[list[list[float]]] = Field(None, max_length=20_000)
+    rota_id: Optional[int] = None
+
+
+# Ponto a mais de 1,5 km do traçado não está nele: aquele trecho volta à estimativa.
+DIST_TRAJETO_M = 1500
+
+
+def _km_trajeto(tr: list[list[float]], i: int, j: int) -> float:
+    p = math.pi / 180
+    s = 0.0
+    for (a1, o1), (a2, o2) in zip(tr[i:j], tr[i + 1:j + 1]):
+        h = math.sin((a2 - a1) * p / 2) ** 2 + math.cos(a1 * p) * math.cos(a2 * p) * math.sin((o2 - o1) * p / 2) ** 2
+        s += 12_742_000 * math.asin(math.sqrt(h))
+    return s / 1000
+
+
+def _indice_no_trajeto(tr: list[list[float]], lat: float, lon: float, desde: int) -> Optional[int]:
+    """Vértice do traçado mais perto do ponto, sem voltar atrás no sentido da rota."""
+    melhor, dmin = None, float("inf")
+    kx = 111_320.0 * math.cos(math.radians(lat))
+    for k in range(desde, len(tr)):
+        d = math.hypot((tr[k][0] - lat) * 111_320.0, (tr[k][1] - lon) * kx)
+        if d < dmin:
+            melhor, dmin = k, d
+    return melhor if dmin <= DIST_TRAJETO_M else None
+
+
+async def _tempo_real_rota(rota_id: int) -> Optional[tuple[float, int]]:
+    """Mediana da duração (min) das viagens que rodaram nesta rota nos últimos 90 dias."""
+    r = await _ler("""SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM local_time_end - local_time_ini) / 60) AS med,
+                             count(*) AS n
+                      FROM mova.con_status_buss_line
+                      WHERE buss_line_shift_route_id = :r AND local_time_ini >= now() - interval '90 days'
+                        AND local_time_end > local_time_ini AND local_time_end - local_time_ini BETWEEN interval '5 minutes' AND interval '6 hours'""",
+                   {"r": rota_id})
+    if r and r[0]["n"] and r[0]["n"] >= 3 and r[0]["med"]:
+        return float(r[0]["med"]), int(r[0]["n"])
+    return None
+
+
+async def _vel_cliente(group_id: int) -> Optional[float]:
+    """Velocidade mediana (km/h, com as paradas de embarque) das rotas do cliente
+    que têm viagens: serve para a rota que ainda não rodou. VTR em 04/10/2026:
+    15 km/h em 209 rotas."""
+    r = await _ler("""WITH m AS (
+            SELECT c.buss_line_shift_route_id AS rid,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM c.local_time_end - c.local_time_ini) / 60) AS med, count(*) AS n
+            FROM mova.con_status_buss_line c
+            WHERE c.group_id = :g AND c.local_time_ini >= now() - interval '90 days'
+              AND c.local_time_end - c.local_time_ini BETWEEN interval '5 minutes' AND interval '6 hours'
+            GROUP BY 1)
+        SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY (ST_Length(r.route::geography) / 1000) / (m.med / 60)) AS vel, count(*) AS n
+        FROM m JOIN mova.route r ON r.id = m.rid WHERE m.n >= 3 AND m.med > 0""", {"g": group_id})
+    if r and r[0]["n"] and r[0]["n"] >= 5 and r[0]["vel"] and 3 < float(r[0]["vel"]) < 120:
+        return float(r[0]["vel"])
+    return None
 
 
 def _dist_m(a: PontoRota, b: PontoRota) -> float:
@@ -197,12 +256,39 @@ async def _operacao(unit_id: Optional[int]) -> str:
 async def calcular(p: Pedido, user=Depends(require_permission("reports", "read"))):
     _grupo_ok(user, p.group_id)
     op = p.operacao or await _operacao(p.unit_id)
-    real = await _osrm(p.pontos)
+    traj = [x for x in (p.trajeto or []) if len(x) == 2] or None
+    real = None if traj else await _osrm(p.pontos)
+    # Traçado da rota cadastrada: cada ponto é localizado nele e o trecho mede
+    # o caminho real entre os dois. O tempo vem da mediana das viagens da rota.
+    idx: list[Optional[int]] = []
+    vel_trajeto, fonte_tempo = None, None
+    if traj:
+        ultimo = 0
+        for x in p.pontos:
+            k = _indice_no_trajeto(traj, x.latitude, x.longitude, ultimo)
+            idx.append(k)
+            if k is not None:
+                ultimo = k
+        km_tr = _km_trajeto(traj, 0, len(traj) - 1)
+        med = await _tempo_real_rota(p.rota_id) if p.rota_id else None
+        if med and km_tr > 0:
+            vel_trajeto = km_tr / (med[0] / 60)
+            fonte_tempo = f"mediana de {med[1]} viagens reais nesta rota ({round(med[0])} min)"
+        else:
+            vc = await _vel_cliente(p.group_id)
+            if vc:
+                vel_trajeto = vc
+                fonte_tempo = f"velocidade mediana das rotas do cliente ({round(vc)} km/h, com paradas), pois esta rota ainda não tem viagens"
     trechos = []
+    usou_trajeto = False
     for i in range(len(p.pontos) - 1):
         a, b = p.pontos[i], p.pontos[i + 1]
         if real:
             km, mn = real["trechos"][i]["km"], real["trechos"][i]["min"]
+        elif traj and idx[i] is not None and idx[i + 1] is not None and idx[i + 1] > idx[i]:
+            km = _km_trajeto(traj, idx[i], idx[i + 1])
+            mn = km / (vel_trajeto or VELOCIDADE[op]) * 60
+            usou_trajeto = True
         else:
             km = _dist_m(a, b) / 1000 * FATOR_ESTRADA
             mn = km / VELOCIDADE[op] * 60
@@ -251,18 +337,21 @@ async def calcular(p: Pedido, user=Depends(require_permission("reports", "read")
     litros = km_total / kml if kml else None
 
     # Pedágio: praças da ANTT a até 1,5 km de algum trecho.
-    linhas = real["geometria"] if real else [[x.latitude, x.longitude] for x in p.pontos]
+    linhas = real["geometria"] if real else traj if usou_trajeto else [[x.latitude, x.longitude] for x in p.pontos]
+    caminho_real = bool(real or usou_trajeto)
     achadas = []
     for pr in _pracas():
         for a, b in zip(linhas, linhas[1:]):
-            if _dist_ponto_segmento_m(pr["lat"], pr["lon"], a, b) <= (RAIO_PRACA_M if real else RAIO_PRACA_RETA_M):
+            if _dist_ponto_segmento_m(pr["lat"], pr["lon"], a, b) <= (RAIO_PRACA_M if caminho_real else RAIO_PRACA_RETA_M):
                 achadas.append(pr)
                 break
     tarifa = p.tarifa_eixo if p.tarifa_eixo is not None else TARIFA_EIXO_PADRAO
     pedagio_valor = round(len(achadas) * p.eixos * tarifa, 2) if achadas else (0.0 if _pracas() else None)
 
     return {
-        "operacao": op, "fonte_rota": "malha viária (OSRM)" if real else "estimativa: linha reta × 1,3 e velocidade média",
+        "operacao": op,
+        "fonte_rota": "malha viária (OSRM)" if real else ("traçado gravado da rota" + (f"; tempo pela {fonte_tempo}" if fonte_tempo else "; tempo pela velocidade média"))
+                      if usou_trajeto else "estimativa: linha reta × 1,3 e velocidade média",
         "trechos": trechos, "km_total": round(km_total, 1), "conducao_min": conducao,
         "pausas": pausas, "pausas_min": sum(x["min"] for x in pausas),
         "paradas_min": sum(x.parada_min for x in p.pontos[1:-1]),
@@ -275,5 +364,5 @@ async def calcular(p: Pedido, user=Depends(require_permission("reports", "read")
                     "base_disponivel": bool(_pracas()), "eixos": p.eixos, "tarifa_eixo": tarifa,
                     "tarifa_estimada": p.tarifa_eixo is None, "valor": pedagio_valor,
                     "observacao": None if _pracas() else "Base de praças da ANTT ainda não carregada; pedágio não estimado."},
-        "geometria": real["geometria"] if real else None,
+        "geometria": real["geometria"] if real else traj if usou_trajeto else None,
     }
