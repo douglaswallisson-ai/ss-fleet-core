@@ -271,7 +271,8 @@ def _u_vinculo(d):
 
 
 # Usuários — vault Telas/Usuarios. Senha não é tratada aqui (o sistema atual gera e manda por e-mail).
-SQL_USUARIO = """SELECT u.id, u.name AS nome, u.login, u.email, u.user_web AS web, u.user_mobile AS mobile, u.user_mova AS usuario_ss,
+SQL_USUARIO = """SELECT u.id, u.name AS nome, u.login, u.email,
+    CASE WHEN u.master = 1 THEN 'admin_empresa' ELSE 'gestor' END AS perfil, u.user_web AS web, u.user_mobile AS mobile, u.user_mova AS usuario_ss,
     u.master AS administrador, u.hour_start AS hora_inicio, u.hour_end AS hora_fim, u.day_start AS dia_inicio, u.day_end AS dia_fim,
     u.end_access AS acesso_ate,
     (SELECT array_agg(DISTINCT uga.subgroup_id) FROM mova.user_group_access uga WHERE uga.user_id = u.id AND uga.group_id = :g) AS subgrupos
