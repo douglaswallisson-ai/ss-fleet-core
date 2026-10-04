@@ -463,6 +463,71 @@ async def justificar(j: Justificativa, user=Depends(require_permission("reports"
     return {"ok": True}
 
 
+IDENT_PRESA_H = 16  # mesmo limiar do "a conferir" da jornada
+
+
+@router.get("/identificacao")
+async def identificacao(group_id: int = Query(...), inicio: date = Query(...), fim: date = Query(...),
+                        user=Depends(require_permission("reports", "read"))):
+    """Identificação do motorista no veículo, para levar ao cliente (pedido do PM, 02/10/2026).
+
+    - Trechos sem motorista: `driver_id` vazio ou motorista coringa ("Não informado").
+    - Identificação presa: o mesmo motorista no mesmo veículo por mais de 16 h sem
+      um descanso de 6 h entre os trechos. Quase sempre é quem não fez logout e
+      outros motoristas rodaram no cartão dele (SUPOSIÇÃO; confirmar com o cliente).
+    """
+    _grupo_ok(user, group_id)
+    if fim < inicio or (fim - inicio).days > 31:
+        raise HTTPException(400, "Período de até 31 dias.")
+    i = datetime.combine(inicio, dtime.min)
+    f = datetime.combine(fim + timedelta(days=1), dtime.min)
+    coringa = r"^\s*n[aã]o\s+(informado|identificado)\s*$"
+    por_veiculo = await _ler(
+        """SELECT ct.unit_id, tu.label AS placa, tu.label2 AS prefixo, count(*) AS trechos,
+                  round(sum(ct.distance_traveled) / 1000.0, 1) AS km,
+                  round(sum(ct.distance_traveled) FILTER (WHERE COALESCE(ct.driver_id, 0) = 0 OR ct.driver_name ~* :c) / 1000.0, 1) AS km_sem,
+                  count(*) FILTER (WHERE COALESCE(ct.driver_id, 0) = 0 OR ct.driver_name ~* :c) AS trechos_sem,
+                  count(DISTINCT ct.driver_id) FILTER (WHERE ct.driver_id > 0 AND NOT ct.driver_name ~* :c) AS motoristas
+           FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id
+           WHERE tu.group_id = :g AND ct.start_time >= :i AND ct.start_time < :f AND ct.distance_traveled > 0
+           GROUP BY ct.unit_id, tu.label, tu.label2""",
+        {"g": group_id, "i": i, "f": f, "c": coringa})
+    presas = await _ler(
+        """WITH t AS (
+             SELECT ct.unit_id, tu.label AS placa, tu.label2 AS prefixo, ct.driver_id, ct.driver_name, ct.start_time,
+                    COALESCE(ct.end_time, ct.start_time) AS end_time, ct.distance_traveled
+             FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id
+             WHERE tu.group_id = :g AND ct.start_time >= :i AND ct.start_time < :f AND ct.driver_id > 0 AND NOT ct.driver_name ~* :c),
+           o AS (SELECT *, CASE WHEN lag(end_time) OVER w IS NULL OR start_time - lag(end_time) OVER w >= interval '6 hours' THEN 1 ELSE 0 END AS novo
+                 FROM t WINDOW w AS (PARTITION BY unit_id, driver_id ORDER BY start_time)),
+           b AS (SELECT *, sum(novo) OVER (PARTITION BY unit_id, driver_id ORDER BY start_time) AS bloco FROM o)
+           SELECT unit_id, max(placa) AS placa, max(prefixo) AS prefixo, driver_id, max(driver_name) AS motorista,
+                  min(start_time) AS desde, max(end_time) AS ate, round(sum(distance_traveled) / 1000.0) AS km,
+                  round(extract(epoch FROM max(end_time) - min(start_time)) / 3600.0, 1) AS horas
+           FROM b GROUP BY unit_id, driver_id, bloco
+           HAVING max(end_time) - min(start_time) > make_interval(hours => :h)
+           ORDER BY horas DESC LIMIT 500""",
+        {"g": group_id, "i": i, "f": f, "c": coringa, "h": IDENT_PRESA_H})
+    km = sum(float(r["km"] or 0) for r in por_veiculo)
+    km_sem = sum(float(r["km_sem"] or 0) for r in por_veiculo)
+    veiculos = sorted(
+        [{"unit_id": r["unit_id"], "veiculo": " · ".join(x for x in (r["prefixo"], r["placa"]) if x and x.strip()),
+          "km": float(r["km"] or 0), "km_sem": float(r["km_sem"] or 0), "trechos": r["trechos"], "trechos_sem": r["trechos_sem"],
+          "motoristas": r["motoristas"], "pct_sem": round(float(r["km_sem"] or 0) / float(r["km"]) * 100, 1) if r["km"] else 0}
+         for r in por_veiculo], key=lambda x: -x["km_sem"])
+    return {
+        "periodo": {"inicio": inicio.isoformat(), "fim": fim.isoformat()},
+        "totais": {"km": round(km), "km_sem": round(km_sem), "pct_sem": round(km_sem / km * 100, 1) if km else 0,
+                   "veiculos": len(veiculos), "veiculos_sem_nenhuma": sum(1 for v in veiculos if v["pct_sem"] >= 99.5),
+                   "identificacoes_presas": len(presas)},
+        "veiculos": veiculos,
+        "presas": [{"unit_id": r["unit_id"], "veiculo": " · ".join(x for x in (r["prefixo"], r["placa"]) if x and x.strip()),
+                    "driver_id": r["driver_id"], "motorista": r["motorista"], "desde": r["desde"].isoformat(timespec="minutes"),
+                    "ate": r["ate"].isoformat(timespec="minutes"), "horas": float(r["horas"]), "km": float(r["km"] or 0)} for r in presas],
+        "regra": f"Identificação presa: mesmo motorista no mesmo veículo por mais de {IDENT_PRESA_H} h sem descanso de 6 h entre os trechos.",
+    }
+
+
 @router.get("/motoristas")
 async def motoristas(group_id: int = Query(...), user=Depends(require_permission("reports", "read"))):
     """Motoristas ativos do grupo, para escala e espelho."""
