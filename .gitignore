@@ -15,3 +15,5 @@ data/suporte.sqlite
 data/acessos_paginas.sqlite
 data/manutencao.sqlite
 data/jornada.sqlite
+data/combustivel.sqlite
+data/cadastros.sqlite

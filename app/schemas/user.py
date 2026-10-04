@@ -82,6 +82,12 @@ class MeResponse(BaseModel):
     #: seletor de cliente — que só existe para administrador — nunca aparecia.
     master: Optional[int] = None
 
+    #: 1 = usuário da SS (caixa "Usuário SS" do cadastro). O backend já o trata
+    #: como super admin (`is_super_admin`); o front precisa saber para liberar
+    #: as telas da SS (Auditoria, Console). Sem isso, um usuário SS com
+    #: master = 0 entrava como gestor e via "Sem permissão" na Auditoria.
+    user_mova: Optional[int] = None
+
     #: Conta do usuário. O front precisa dela para saber qual empresa está
     #: exibindo; sem isso a organização ativa fica indefinida e a interface
     #: mostra um cliente de exemplo. Os grupos acessíveis vêm de
