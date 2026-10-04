@@ -27,6 +27,7 @@ Rota e pedágio:
 """
 
 import csv
+import re
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -53,6 +54,14 @@ DESCANSO_MIN = 11 * 60
 KML_PADRAO = {"carga": 2.5, "passageiros": 3.0}  # SUPOSIÇÃO, só sem histórico
 PRACAS = Path(__file__).resolve().parents[4] / "data" / "pracas_pedagio.csv"
 RAIO_PRACA_M = 1500
+# Sem a malha viária, o trajeto é a linha reta entre os pontos e a estrada real
+# se afasta dela: 15 km pegou as 8 praças da Fernão Dias de Betim a São Paulo.
+RAIO_PRACA_RETA_M = 15_000
+# Veículo comercial paga a tarifa básica da praça × número de eixos (regra ANTT;
+# ex.: básica R$ 4,00 → 6 eixos R$ 24,00). A tarifa de cada praça não é dado
+# aberto. SUPOSIÇÃO: R$ 8,00 por eixo, valor do meio da faixa das concessões
+# federais; o usuário troca na tela. Aprovado como estimativa pelo PM (04/10/2026).
+TARIFA_EIXO_PADRAO = 8.0
 _PRACAS_CACHE: Optional[list[dict]] = None
 
 
@@ -111,18 +120,30 @@ def _pracas() -> list[dict]:
         return _PRACAS_CACHE
     out = []
     if PRACAS.exists():
-        with PRACAS.open(encoding="utf-8-sig", errors="replace") as f:
+        # O arquivo da ANTT vem em Latin-1.
+        with PRACAS.open(encoding="latin-1") as f:
             for r in csv.DictReader(f, delimiter=";"):
                 try:
                     if (r.get("situacao") or "").lower().startswith("inativ"):
+                        continue
+                    # Free Flow cobra por pórtico de entrada/saída, não como praça: fica de fora da estimativa.
+                    if (r.get("praca_de_pedagio") or "").lower().startswith("free flow"):
                         continue
                     out.append({"nome": r.get("praca_de_pedagio") or r.get("praca"), "rodovia": r.get("rodovia"),
                                 "uf": r.get("uf"), "lat": float(str(r["latitude"]).replace(",", ".")),
                                 "lon": float(str(r["longitude"]).replace(",", "."))})
                 except (KeyError, ValueError):
                     continue
-    _PRACAS_CACHE = out
-    return out
+    # Uma praça aparece em mais de uma linha (pista principal e marginal, sentidos).
+    vistos, unicas = set(), []
+    for x in out:
+        base = re.sub(r"\b(norte|sul|leste|oeste|defasada|crescente|decrescente)\b|[-–]", "", (x["nome"] or "").lower())
+        k = (re.sub(r"\s+", " ", base).strip(), x["rodovia"])
+        if k not in vistos:
+            vistos.add(k)
+            unicas.append(x)
+    _PRACAS_CACHE = unicas
+    return unicas
 
 
 def _dist_ponto_segmento_m(lat, lon, a, b) -> float:
@@ -234,10 +255,11 @@ async def calcular(p: Pedido, user=Depends(require_permission("reports", "read")
     achadas = []
     for pr in _pracas():
         for a, b in zip(linhas, linhas[1:]):
-            if _dist_ponto_segmento_m(pr["lat"], pr["lon"], a, b) <= RAIO_PRACA_M:
+            if _dist_ponto_segmento_m(pr["lat"], pr["lon"], a, b) <= (RAIO_PRACA_M if real else RAIO_PRACA_RETA_M):
                 achadas.append(pr)
                 break
-    pedagio_valor = round(len(achadas) * p.eixos * p.tarifa_eixo, 2) if p.tarifa_eixo is not None and achadas else None
+    tarifa = p.tarifa_eixo if p.tarifa_eixo is not None else TARIFA_EIXO_PADRAO
+    pedagio_valor = round(len(achadas) * p.eixos * tarifa, 2) if achadas else (0.0 if _pracas() else None)
 
     return {
         "operacao": op, "fonte_rota": "malha viária (OSRM)" if real else "estimativa: linha reta × 1,3 e velocidade média",
@@ -250,7 +272,8 @@ async def calcular(p: Pedido, user=Depends(require_permission("reports", "read")
                         "preco_litro": preco, "fonte_preco": fonte_preco,
                         "custo": round(litros * preco, 2) if litros and preco else None},
         "pedagio": {"pracas": [{"nome": x["nome"], "rodovia": x["rodovia"], "uf": x["uf"]} for x in achadas],
-                    "base_disponivel": bool(_pracas()), "eixos": p.eixos, "tarifa_eixo": p.tarifa_eixo, "valor": pedagio_valor,
+                    "base_disponivel": bool(_pracas()), "eixos": p.eixos, "tarifa_eixo": tarifa,
+                    "tarifa_estimada": p.tarifa_eixo is None, "valor": pedagio_valor,
                     "observacao": None if _pracas() else "Base de praças da ANTT ainda não carregada; pedágio não estimado."},
         "geometria": real["geometria"] if real else None,
     }
