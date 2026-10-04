@@ -88,6 +88,10 @@ class Settings(BaseSettings):
             "contas, origens, marca). Ver app/api/v1/endpoints/embed.py."
         ),
     )
+    ROTEIRIZADOR_OSRM_URL: str = Field(
+        default="",
+        description="Servidor OSRM (malha viária) da roteirização. Vazio = estimativa por linha reta. Ver roteirizacao.py.",
+    )
     SS_ADMIN_USER_IDS: str = Field(
         default="",
         description=(
