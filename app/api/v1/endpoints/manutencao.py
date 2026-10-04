@@ -55,6 +55,8 @@ ODOM_INVALIDOS = {0, 100_000_000}
 #: Antecedência para "vence em breve".
 AVISO_KM = 1_000
 AVISO_DIAS = 15
+# Horímetro: `hourmeter`/`can_engine_hourmeter` vêm em MINUTOS (confirmado pelo PM, 02/10/2026).
+AVISO_HORAS = 50
 
 LIMITES = {
     "temp_atencao": 96.0, "temp_critico": 107.0,           # °C — acima da faixa normal / máximo Cummins
@@ -68,16 +70,16 @@ LIMITES = {
 # Modelos de plano oferecidos como SUGESTÃO (o cliente ajusta ao manual do fabricante).
 MODELOS_PLANO = [
     {"id": "pesado", "nome": "Caminhão pesado (sugestão)", "categorias": [3, 7, 20, 21], "itens": [
-        {"servico": "Troca de óleo do motor e filtro", "km": 30000, "dias": 180},
-        {"servico": "Filtro de combustível", "km": 30000, "dias": 180},
+        {"servico": "Troca de óleo do motor e filtro", "km": 30000, "dias": 180, "horas": 1000},
+        {"servico": "Filtro de combustível", "km": 30000, "dias": 180, "horas": 1500},
         {"servico": "Filtro de ar", "km": 60000, "dias": 365},
         {"servico": "Revisão de freios", "km": 40000, "dias": 180},
         {"servico": "Lubrificação do chassi", "km": 10000, "dias": 60},
         {"servico": "Revisão geral", "km": 100000, "dias": 365},
     ]},
     {"id": "onibus", "nome": "Ônibus urbano (sugestão)", "categorias": [12, 22], "itens": [
-        {"servico": "Troca de óleo do motor e filtro", "km": 20000, "dias": 120},
-        {"servico": "Filtro de combustível", "km": 20000, "dias": 120},
+        {"servico": "Troca de óleo do motor e filtro", "km": 20000, "dias": 120, "horas": 1000},
+        {"servico": "Filtro de combustível", "km": 20000, "dias": 120, "horas": 1500},
         {"servico": "Filtro de ar", "km": 40000, "dias": 240},
         {"servico": "Revisão de freios", "km": 25000, "dias": 120},
         {"servico": "Ar-condicionado", "km": None, "dias": 90},
@@ -107,6 +109,7 @@ def _con() -> sqlite3.Connection:
             id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, unit_id INTEGER NOT NULL,
             servico TEXT NOT NULL, data TEXT NOT NULL, odometro_km REAL, custo REAL, oficina TEXT, obs TEXT,
             ordem_id INTEGER, registrado_em TEXT, registrado_por INTEGER);
+        CREATE TABLE IF NOT EXISTS _migracao (nome TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS ordem (
             id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER NOT NULL, unit_id INTEGER NOT NULL,
             tipo TEXT NOT NULL, titulo TEXT NOT NULL, descricao TEXT, prioridade TEXT NOT NULL,
@@ -114,6 +117,9 @@ def _con() -> sqlite3.Connection:
             responsavel TEXT, historico TEXT, aberta_por INTEGER);
         """
     )
+    # Coluna nova (horímetro do serviço), para bases criadas antes dela.
+    if "horimetro_h" not in {r[1] for r in c.execute("PRAGMA table_info(servico)")}:
+        c.execute("ALTER TABLE servico ADD COLUMN horimetro_h REAL")
     return c
 
 
@@ -142,7 +148,8 @@ async def _frota(group_id: int) -> list[dict]:
                ds.local_time, ds.odom, ds.can_total_odometer, ds.odom_quality_flag,
                ds.can_engine_coolant_temp AS temp, ds.can_engine_oil_pressure AS oleo, ds.voltage,
                ds.can_def_level_percent AS arla, ds.can_fuel_level_percent AS combustivel,
-               ds.can_pneumatic_system1_pressure AS ar_freio, COALESCE(ds.can_rpm, ds.rpm) AS rpm, ds.ignition
+               ds.can_pneumatic_system1_pressure AS ar_freio, COALESCE(ds.can_rpm, ds.rpm) AS rpm, ds.ignition,
+               ds.can_engine_hourmeter, ds.hourmeter
         FROM mova.tracked_unit tu
         LEFT JOIN mova.unit_category uc ON uc.id = tu.unit_category_id
         LEFT JOIN mova.dev_status ds ON ds.unit_id = tu.id
@@ -162,6 +169,9 @@ async def _frota(group_id: int) -> list[dict]:
             km = float(alt) / 1000
         d["odometro_km"] = round(km) if km is not None else None
         d["odometro_travado"] = qualidade == "frozen_business_rule"
+        h_can, h_eq = d.pop("can_engine_hourmeter"), d.pop("hourmeter")
+        minutos = next((float(x) for x in (h_can, h_eq) if x is not None and float(x) > 0), None)
+        d["horimetro_h"] = round(minutos / 60) if minutos else None
         for k in ("temp", "oleo", "voltage", "arla", "combustivel", "ar_freio", "rpm"):
             d[k] = float(d[k]) if d[k] is not None and float(d[k]) != 0 else None
         out.append(d)
@@ -222,6 +232,7 @@ class ItemPlano(BaseModel):
     servico: str = Field(..., min_length=2, max_length=80)
     km: Optional[int] = Field(None, ge=100, le=1_000_000)
     dias: Optional[int] = Field(None, ge=1, le=3650)
+    horas: Optional[int] = Field(None, ge=10, le=50_000, description="Intervalo em horas de motor (horímetro)")
 
 
 class Plano(BaseModel):
@@ -248,9 +259,9 @@ async def listar_planos(group_id: int = Query(...), user=Depends(require_permiss
 @router.post("/planos")
 async def salvar_plano(p: Plano, plano_id: Optional[int] = Query(None), user=Depends(require_permission("reports", "read"))):
     _grupo_ok(user, p.group_id)
-    itens = [i.model_dump() for i in p.itens if i.km or i.dias]
+    itens = [i.model_dump() for i in p.itens if i.km or i.dias or i.horas]
     if not itens:
-        raise HTTPException(422, "Cada serviço precisa de um intervalo em km ou em dias.")
+        raise HTTPException(422, "Cada serviço precisa de um intervalo em km, dias ou horas de motor.")
     with _trava, _con() as c:
         if plano_id:
             c.execute("UPDATE plano SET nome=?, escopo=?, alvo=?, itens=?, atualizado_em=?, atualizado_por=? WHERE id=? AND group_id=?",
@@ -288,6 +299,7 @@ class Servico(BaseModel):
     servico: str = Field(..., min_length=2, max_length=80)
     data: date
     odometro_km: Optional[float] = Field(None, ge=0)
+    horimetro_h: Optional[float] = Field(None, ge=0)
     custo: Optional[float] = Field(None, ge=0)
     oficina: Optional[str] = Field(None, max_length=120)
     obs: Optional[str] = Field(None, max_length=1000)
@@ -299,9 +311,9 @@ async def registrar_servico(s: Servico, user=Depends(require_permission("reports
     _grupo_ok(user, s.group_id)
     with _trava, _con() as c:
         cur = c.execute(
-            "INSERT INTO servico (group_id, unit_id, servico, data, odometro_km, custo, oficina, obs, ordem_id, registrado_em, registrado_por)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (s.group_id, s.unit_id, s.servico, s.data.isoformat(), s.odometro_km, s.custo, s.oficina, s.obs, s.ordem_id, _agora(), user.user_id),
+            "INSERT INTO servico (group_id, unit_id, servico, data, odometro_km, horimetro_h, custo, oficina, obs, ordem_id, registrado_em, registrado_por)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (s.group_id, s.unit_id, s.servico, s.data.isoformat(), s.odometro_km, s.horimetro_h, s.custo, s.oficina, s.obs, s.ordem_id, _agora(), user.user_id),
         )
         if s.ordem_id:
             _mudar_status(c, s.ordem_id, s.group_id, "concluida", user.user_id, f"Serviço registrado: {s.servico}", custo=s.custo)
@@ -319,13 +331,18 @@ async def historico(group_id: int = Query(...), unit_id: Optional[int] = Query(N
         return [dict(r) for r in c.execute(sql + " ORDER BY data DESC, id DESC LIMIT 500", par).fetchall()]
 
 
-def _situacao_item(item: dict, ultimo: Optional[dict], km_atual: Optional[float]) -> dict:
+def _situacao_item(item: dict, ultimo: Optional[dict], km_atual: Optional[float], horas_atual: Optional[float] = None) -> dict:
     hoje = date.today()
-    res = {"servico": item["servico"], "intervalo_km": item.get("km"), "intervalo_dias": item.get("dias"),
-           "ultimo": ultimo and {"data": ultimo["data"], "odometro_km": ultimo["odometro_km"]}}
+    res = {"servico": item["servico"], "intervalo_km": item.get("km"), "intervalo_dias": item.get("dias"), "intervalo_horas": item.get("horas"),
+           "ultimo": ultimo and {"data": ultimo["data"], "odometro_km": ultimo["odometro_km"], "horimetro_h": ultimo.get("horimetro_h")}}
     if not ultimo:
-        return {**res, "situacao": "sem_registro", "falta_km": None, "falta_dias": None, "proximo_km": None, "proxima_data": None}
-    falta_km = falta_dias = proximo_km = proxima_data = None
+        return {**res, "situacao": "sem_registro", "falta_km": None, "falta_dias": None, "falta_horas": None, "proximo_km": None,
+                "proxima_data": None, "proximo_horimetro_h": None}
+    falta_km = falta_dias = proximo_km = proxima_data = falta_h = proximo_h = None
+    if item.get("horas") and ultimo.get("horimetro_h") is not None:
+        proximo_h = ultimo["horimetro_h"] + item["horas"]
+        if horas_atual is not None:
+            falta_h = round(proximo_h - horas_atual)
     if item.get("km") and ultimo["odometro_km"] is not None:
         proximo_km = ultimo["odometro_km"] + item["km"]
         if km_atual is not None:
@@ -334,10 +351,11 @@ def _situacao_item(item: dict, ultimo: Optional[dict], km_atual: Optional[float]
         d = date.fromisoformat(ultimo["data"]) + timedelta(days=item["dias"])
         proxima_data = d.isoformat()
         falta_dias = (d - hoje).days
-    vencido = (falta_km is not None and falta_km <= 0) or (falta_dias is not None and falta_dias <= 0)
-    breve = (falta_km is not None and falta_km <= AVISO_KM) or (falta_dias is not None and falta_dias <= AVISO_DIAS)
+    vencido = (falta_km is not None and falta_km <= 0) or (falta_dias is not None and falta_dias <= 0) or (falta_h is not None and falta_h <= 0)
+    breve = (falta_km is not None and falta_km <= AVISO_KM) or (falta_dias is not None and falta_dias <= AVISO_DIAS)         or (falta_h is not None and falta_h <= AVISO_HORAS)
     return {**res, "situacao": "vencido" if vencido else "vence_em_breve" if breve else "em_dia",
-            "falta_km": falta_km, "falta_dias": falta_dias, "proximo_km": proximo_km and round(proximo_km), "proxima_data": proxima_data}
+            "falta_km": falta_km, "falta_dias": falta_dias, "falta_horas": falta_h, "proximo_km": proximo_km and round(proximo_km),
+            "proxima_data": proxima_data, "proximo_horimetro_h": proximo_h and round(proximo_h)}
 
 
 ORDEM_SIT = {"vencido": 0, "vence_em_breve": 1, "sem_registro": 2, "em_dia": 3}
@@ -366,12 +384,12 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
         itens = []
         if plano:
             for it in plano["itens"]:
-                itens.append(_situacao_item(it, ultimo.get((v["unit_id"], it["servico"].strip().lower())), v["odometro_km"]))
+                itens.append(_situacao_item(it, ultimo.get((v["unit_id"], it["servico"].strip().lower())), v["odometro_km"], v.get("horimetro_h")))
             itens.sort(key=lambda i: (ORDEM_SIT[i["situacao"]], i["falta_km"] if i["falta_km"] is not None else 10**9))
         alertas = _alertas_do_veiculo(v)
         oss = os_por_veiculo.get(v["unit_id"], [])
         veiculos.append({
-            **{k: v[k] for k in ("unit_id", "placa", "prefixo", "modelo", "ano", "categoria_id", "categoria", "odometro_km", "odometro_travado")},
+            **{k: v[k] for k in ("unit_id", "placa", "prefixo", "modelo", "ano", "categoria_id", "categoria", "odometro_km", "odometro_travado", "horimetro_h")},
             "ultimo_sinal": v["local_time"],
             "sinais": {k: v[k] for k in ("temp", "oleo", "voltage", "arla", "combustivel", "ar_freio", "rpm")},
             "plano": plano and {"id": plano["id"], "nome": plano["nome"], "escopo": plano["escopo"]},
