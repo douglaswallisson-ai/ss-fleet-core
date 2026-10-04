@@ -117,6 +117,12 @@ SQL_EMPRESA = """SELECT g.id, g.name AS nome, g.corporate_name AS razao_social, 
 
 def _v_empresa(d, ctx):
     _exigir(d, ("nome", "Nome do grupo"), ("velocidade_max", "Velocidade máxima"))
+    logo = d.get("logo")
+    if logo:
+        if not str(logo).startswith(("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/svg+xml;base64,", "data:image/webp;base64,")):
+            raise Erro("logo", "A logo deve ser uma imagem PNG, JPG, SVG ou WEBP.")
+        if len(logo) > 700_000:
+            raise Erro("logo", "A logo deve ter no máximo 500 KB.")
     if d.get("cnpj") and len(_so_digitos(d["cnpj"])) != 14:
         raise Erro("cnpj", "CNPJ deve ter 14 dígitos (99.999.999/9999-99).")
     if not 0 <= (_num(d["velocidade_max"]) or 0) <= 200:

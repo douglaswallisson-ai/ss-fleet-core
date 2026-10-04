@@ -97,3 +97,26 @@ async def ajustar(m: Modulos, group_id: int = Query(...), user=Depends(require_p
         else:
             c.execute("DELETE FROM modulos WHERE group_id = ?", (group_id,))
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ logo
+
+@router.get("/logo")
+async def logo(group_id: int = Query(...), user=Depends(require_permission("reports", "read"))):
+    """Logo do cliente: a enviada no cadastro do grupo (Cadastros > Grupos, provisória)
+    ou, se a conta é só deste cliente, a `account.imglogo`. Decisão do PM
+    (02/10/2026): sem logo, o cliente envia. Todas as empresas da conta 539
+    dividem a mesma logo (a da SS), por isso a conta compartilhada não vale."""
+    _grupo_ok(user, group_id)
+    from app.api.v1.endpoints import cadastros
+    for r in cadastros._overlay("empresa", group_id):
+        d = json.loads(r["dados"])
+        if d.get("logo"):
+            return {"logo": d["logo"], "origem": "cadastro"}
+    async with AsyncSessionLocalReplica() as db:
+        r = (await db.execute(text(
+            'SELECT a.imglogo, (SELECT count(*) FROM mova."group" g2 WHERE g2.account_id = a.id) AS grupos '
+            'FROM mova."group" g JOIN mova.account a ON a.id = g.account_id WHERE g.id = :g'), {"g": group_id})).mappings().first()
+    if r and r["imglogo"] and r["grupos"] == 1:
+        return {"logo": r["imglogo"], "origem": "conta"}
+    return {"logo": None, "origem": None}
