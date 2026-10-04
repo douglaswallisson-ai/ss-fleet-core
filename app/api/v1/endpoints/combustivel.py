@@ -435,7 +435,7 @@ def _periodo(inicio: date, fim: date) -> tuple[datetime, datetime]:
 def _agregar(linhas: list[dict]) -> dict:
     """Totais de UM veículo no período (aggregate_supply_rows do time): km/L e
     custo/km somam os ciclos completos, sem os ciclos com erro não verificado."""
-    litros = arla = gasto = ciclo_km = ciclo_l = 0.0
+    litros = arla = gasto = ciclo_km = ciclo_l = ciclo_valor = 0.0
     abertos = {"error": 0, "warn": 0, "info": 0}
     ultimo = None
     ultimo_tipo = None
@@ -455,13 +455,17 @@ def _agregar(linhas: list[dict]) -> dict:
                 and not F.cycle_excluded_from_average([a["code"] for a in x["alerts"]], rev)):
             ciclo_km += x["ciclo_km"]
             ciclo_l += x["ciclo_litros"] or 0
+            ciclo_valor += (x["custo_por_km"] or 0) * x["ciclo_km"]
         if ultimo is None or x["event_datetime"] > ultimo["event_datetime"]:
             ultimo = x
     return {"supplies": len(linhas), "liters": round(litros, 1), "litersArla": round(arla, 1), "spent": round(gasto, 2),
             "kmDriven": round(ciclo_km, 1) if ciclo_km else None,
             "kmPerLiter": round(ciclo_km / ciclo_l, 2) if ciclo_l else None,
-            "costPerKm": round(gasto / ciclo_km, 2) if ciclo_km else None, "openAlerts": abertos,
-            "_ciclo_l": ciclo_l, "lastFuelTypeId": ultimo_tipo,
+            # Diferença consciente do módulo do time (que divide o gasto TOTAL pelos km
+            # dos ciclos válidos e dava R$ 36/km num caminhão): aqui é o gasto dos
+            # mesmos ciclos ÷ os km desses ciclos.
+            "costPerKm": round(ciclo_valor / ciclo_km, 2) if ciclo_km else None, "openAlerts": abertos,
+            "_ciclo_l": ciclo_l, "_ciclo_valor": ciclo_valor, "lastFuelTypeId": ultimo_tipo,
             "lastSupply": {"at": ultimo["event_datetime"].isoformat(timespec="minutes"), "km": ultimo["km_informado_atual"]} if ultimo else None}
 
 
@@ -518,12 +522,13 @@ async def painel(group_id: int = Query(...), inicio: date = Query(...), fim: dat
         if _bate_busca(d, x["unit_id"], busca):
             por[x["unit_id"]].append(x)
     resumos = []
-    ciclo_l_total = 0.0
+    ciclo_l_total = ciclo_valor_total = 0.0
     for uid, ls in por.items():
         a = _agregar(ls)
         p = d["perfis"].get(uid)
         st = F.consumption_status(a["kmPerLiter"], (p or {}).get("expected_kml_min"), (p or {}).get("expected_kml_max"))
         ciclo_l_total += a.pop("_ciclo_l")
+        ciclo_valor_total += a.pop("_ciclo_valor")
         resumos.append({"unitId": uid, "vehicle": _veiculo_ref(d, uid), "plate": _veiculo_ref(d, uid)["plate"],
                         "fleetNumber": _veiculo_ref(d, uid)["fleetNumber"], "subgroupName": _veiculo_ref(d, uid)["subgroupName"],
                         "fuelTypeId": a.pop("lastFuelTypeId"), "tankCapacityL": (p or {}).get("tank_capacity_l"),
@@ -536,7 +541,7 @@ async def painel(group_id: int = Query(...), inicio: date = Query(...), fim: dat
         "litersArla": round(sum(r["litersArla"] for r in resumos), 1), "supplies": sum(r["supplies"] for r in resumos),
         "kmDriven": round(km_total, 1), "vehicles": len(resumos),
         "kmPerLiter": round(km_total / ciclo_l_total, 2) if ciclo_l_total else None,
-        "costPerKm": round(gasto / km_total, 2) if km_total else None,
+        "costPerKm": round(ciclo_valor_total / km_total, 2) if km_total else None,
         "openAlerts": {k: sum(r["openAlerts"][k] for r in resumos) for k in ("error", "warn", "info")},
         "vehiclesOutOfRange": sum(1 for r in resumos if r["consumptionStatus"] in ("below", "above")),
     }
@@ -580,6 +585,7 @@ async def veiculo(unit_id: int, group_id: int = Query(...), inicio: date = Query
                 key=lambda x: (x["event_datetime"], x["id"]))
     a = _agregar(ls)
     a.pop("_ciclo_l")
+    a.pop("_ciclo_valor")
     p = d["perfis"].get(unit_id)
     a["consumptionStatus"] = F.consumption_status(a["kmPerLiter"], (p or {}).get("expected_kml_min"), (p or {}).get("expected_kml_max"))
     ref = _veiculo_ref(d, unit_id)
@@ -1009,6 +1015,20 @@ def _resumo(raw) -> dict:
             "station": _primeiro(p, "station"), "driver": _primeiro(p, "driver"), "value": _num_br(_primeiro(p, "value"))}
 
 
+# O serviço de integração grava o motivo como código; aqui vira texto.
+_MOTIVOS = {
+    "PLACA_GENERICA_SEM_UNIDADE_ESPECIFICA": ("PLACA_GENERICA", "Placa genérica do cartão (terceiro ou agregado): escolha o veículo que abasteceu."),
+    "PLACA_SEM_RASTREADOR_CADASTRADO": ("PLACA_SEM_VEICULO", "Placa sem veículo com rastreador cadastrado neste cliente."),
+}
+
+
+def _motivo(codigo: Optional[str], msg: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    for chave, (cod, texto) in _MOTIVOS.items():
+        if msg and chave in msg:
+            return codigo or cod, texto
+    return codigo, msg
+
+
 async def _pendencias_banco(g: int):
     return await _ler(
         """SELECT st.id, st.fuel_supplier_id, sp.code AS sup_code, sp.name AS sup_name, st.external_ref, st.raw_payload,
@@ -1034,23 +1054,24 @@ async def pendencias(group_id: int = Query(...), situacao: str = Query("open", p
     out = []
     for r in rows:
         st = loc[r["id"]]["status"] if r["id"] in loc else r["processing_status"]
+        cod, msg = _motivo(r["error_code"], r["error_message"])
         aberto = st in ("PENDING", "ERROR")
         if aberto:
             por_sit["open"] += 1
-            if r["error_code"]:
-                por_cod[r["error_code"]] = por_cod.get(r["error_code"], 0) + 1
+            if cod:
+                por_cod[cod] = por_cod.get(cod, 0) + 1
         elif st in por_sit:
             por_sit[st] += 1
         if not ((situacao == "open" and aberto) or situacao == st):
             continue
-        if codigo and r["error_code"] != codigo:
+        if codigo and cod != codigo:
             continue
         resumo = _resumo(r["raw_payload"])
         if busca and busca.lower() not in json.dumps(r["raw_payload"], default=str).lower() and busca.lower() not in (r["external_ref"] or "").lower():
             continue
         l = loc.get(r["id"])
         out.append({"id": r["id"], "supplier": {"code": r["sup_code"], "name": r["sup_name"]}, "externalRef": r["external_ref"],
-                    "status": st, "errorCode": r["error_code"], "errorMessage": r["error_message"], "summary": resumo,
+                    "status": st, "errorCode": cod, "errorMessage": msg, "summary": resumo,
                     "dateAdd": str(r["date_add"])[:16] if r["date_add"] else None,
                     "resolution": {"note": l["nota"], "at": l["em"], "supplyId": l["supply_id"]} if l else
                                   ({"note": r["resolution_note"], "at": str(r["resolved_at"])[:16]} if r["resolved_at"] else None),
@@ -1077,8 +1098,9 @@ async def pendencia(pend_id: int, group_id: int = Query(...), user=Depends(requi
                                   "reason": "Placa idêntica." if dist == 0 else "Mesma placa, com pequenas diferenças (troca de letra/número ou pontuação)."})
         sugestoes.sort(key=lambda s: s["distance"])
     tipo_sugerido = _tipo_por_texto(d, resumo["product"] or "")
+    cod, msg = _motivo(r["error_code"], r["error_message"])
     return {"id": r["id"], "supplier": {"code": r["sup_code"], "name": r["sup_name"]}, "externalRef": r["external_ref"],
-            "errorCode": r["error_code"], "errorMessage": r["error_message"], "summary": resumo,
+            "errorCode": cod, "errorMessage": msg, "summary": resumo,
             "rawPayload": r["raw_payload"], "suggestions": sugestoes[:10], "suggestedFuelTypeId": tipo_sugerido,
             "needs": {"fuelType": r["error_code"] == "PRODUTO_DESCONHECIDO" or tipo_sugerido is None, "liters": resumo["liters"] is None}}
 
