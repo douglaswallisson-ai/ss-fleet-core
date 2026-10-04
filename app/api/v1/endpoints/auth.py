@@ -298,4 +298,8 @@ async def get_me(
             detail="User not found"
         )
 
-    return user
+    resposta = MeResponse.model_validate(user)
+    # O front decide o perfil pelo user_mova: aqui ele já reflete a lista
+    # SS_ADMIN_USER_IDS, para a mesma regra valer nos dois lados.
+    resposta.user_mova = 1 if user.is_super_admin else (user.user_mova or 0)
+    return resposta

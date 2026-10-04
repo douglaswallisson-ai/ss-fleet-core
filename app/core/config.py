@@ -88,6 +88,14 @@ class Settings(BaseSettings):
             "contas, origens, marca). Ver app/api/v1/endpoints/embed.py."
         ),
     )
+    SS_ADMIN_USER_IDS: str = Field(
+        default="",
+        description=(
+            "Ids de usuários da SS tratados como super admin mesmo sem a caixa "
+            "'Usuário SS' (users.user_mova) marcada no cadastro, separados por vírgula. "
+            "Paliativo enquanto o cadastro não é corrigido no sistema atual."
+        ),
+    )
     SSO_TICKET_MAX_AGE_SECONDS: int = Field(
         default=60,
         description="Janela maxima de validade de um ticket de SSO handoff, em segundos"

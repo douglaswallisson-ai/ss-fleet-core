@@ -87,8 +87,16 @@ class User(Base):
 
     @property
     def is_super_admin(self) -> bool:
-        """Check if user is a SS Telematica internal user (super admin)."""
-        return self.user_mova == 1
+        """Check if user is a SS Telematica internal user (super admin).
+
+        Além de `user_mova`, aceita os ids de SS_ADMIN_USER_IDS (paliativo para
+        usuário da SS cujo cadastro está sem a caixa "Usuário SS").
+        """
+        if self.user_mova == 1:
+            return True
+        from app.core.config import settings
+        ids = {s.strip() for s in (settings.SS_ADMIN_USER_IDS or "").split(",") if s.strip()}
+        return str(self.id) in ids
 
     @property
     def password_hash(self) -> str:

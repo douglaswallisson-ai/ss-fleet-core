@@ -800,7 +800,7 @@ class Motivo(BaseModel):
     autor_nome: Optional[str] = None
 
 
-@router.delete("/abastecimentos/{supply_id}")
+@router.post("/abastecimentos/{supply_id}/excluir")
 async def excluir(supply_id: int, m: Motivo, user=Depends(require_permission("reports", "read"))):
     """Sai dos cálculos, mas continua no histórico com o motivo."""
     _grupo_ok(user, m.group_id)

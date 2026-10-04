@@ -17,3 +17,4 @@ data/manutencao.sqlite
 data/jornada.sqlite
 data/combustivel.sqlite
 data/cadastros.sqlite
+data/cliente.sqlite
