@@ -34,6 +34,7 @@ from app.middleware.auth import require_permission
 router = APIRouter()
 
 VERSAO = "v1"
+KM_MIN_PERFIL = 5  # km: trajeto mais curto não recebe classe de relevo
 #: Pontos do gráfico do trajeto; o cálculo usa todos.
 MAX_PONTOS_GRAFICO = 900
 #: Leituras de dias em paralelo, cada uma numa conexão.
@@ -174,9 +175,11 @@ async def trajeto(
             "km": round(res["km"], 1),
             "subida_m": round(res["subida_m"]),
             "descida_m": round(res["descida_m"]),
-            "subida_por_100km": round(100 * res["subida_m"] / km_med, 1) if km_med else None,
-            "pct_aclive": round(100 * res["km_aclive"] / km_med, 1) if km_med else None,
-            "pct_declive": round(100 * res["km_declive"] / km_med, 1) if km_med else None,
+            # Abaixo de KM_MIN_PERFIL a proporção não diz nada (3 m de subida em 70 m
+            # viravam "serra, 4.386 m/100 km"): fica sem classificação.
+            "subida_por_100km": round(100 * res["subida_m"] / km_med, 1) if km_med and km_med >= KM_MIN_PERFIL else None,
+            "pct_aclive": round(100 * res["km_aclive"] / km_med, 1) if km_med and km_med >= KM_MIN_PERFIL else None,
+            "pct_declive": round(100 * res["km_declive"] / km_med, 1) if km_med and km_med >= KM_MIN_PERFIL else None,
             "elevacao_min": _r(min(elevs)) if elevs else None,
             "elevacao_max": _r(max(elevs)) if elevs else None,
         },
