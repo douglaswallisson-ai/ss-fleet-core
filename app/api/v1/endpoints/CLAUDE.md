@@ -17,6 +17,7 @@ Padrão de código: ver `../../../../CLAUDE.md` (raiz do projeto), seção 2.
 | `timeline.py` | `/eventos/timeline` | linha do tempo de eventos por veículo/motorista | não | `_docs/tracking-e-timeline.md` |
 | `events.py` | `/events` | alarmes e ocorrências com reconhecimento | `acknowledge` grava em produção — **não usar** | `_docs/eventos-e-video.md` |
 | `video.py` | `/video` | câmeras e ocorrências DMS/ADAS | não | `_docs/eventos-e-video.md` |
+| `cameras.py` | `/cameras` | vídeo ao vivo (JIMI JC450 em FLV, Hikvision G40 em HLS) via proxies, chaves no `.env` | não grava; abrir canal pede transmissão ao equipamento | `_docs/eventos-e-video.md` |
 | `bi.py` | `/bi` | páginas do Power BI "Indicadores de Condução" | não | `_docs/gerencial-e-bi.md` |
 | `gerencial.py` | `/gerencial` | série diária, ocioso, ROI, CO₂ | não | `_docs/gerencial-e-bi.md` |
 | `driver_ranking.py` | `/driver-ranking` | pontuação dos motoristas (fórmula do BI) | não | `_docs/gerencial-e-bi.md` |

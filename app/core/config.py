@@ -92,6 +92,22 @@ class Settings(BaseSettings):
         default="",
         description="Servidor OSRM (malha viária) da roteirização. Vazio = estimativa por linha reta. Ver roteirizacao.py.",
     )
+    JIMI_PROXY_URL: str = Field(
+        default="",
+        description="API Gateway do proxy JIMI (câmeras JC450): status online e abrir vídeo ao vivo. Ver cameras.py.",
+    )
+    JIMI_STREAM_CDN: str = Field(
+        default="",
+        description="CloudFront HTTPS que serve o FLV da JIMI no lugar da porta 8881 (HTTP). Ver cameras.py.",
+    )
+    HIKVISION_API_URL: str = Field(
+        default="",
+        description="API Gateway do proxy Hikvision HAT Cloud (G40/G40 PRO). Ver cameras.py.",
+    )
+    HIKVISION_API_KEY: str = Field(
+        default="",
+        description="x-api-key do API Gateway Hikvision. Segredo: só no .env, nunca no código.",
+    )
     SS_ADMIN_USER_IDS: str = Field(
         default="",
         description=(
