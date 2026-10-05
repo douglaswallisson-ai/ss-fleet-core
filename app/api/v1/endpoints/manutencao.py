@@ -222,6 +222,7 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
                count(*) FILTER (WHERE coalesce(d.can_rpm, 0) = 0 AND d.voltage >= 5) AS v_desl_n,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY d.voltage) FILTER (WHERE coalesce(d.can_rpm, 0) = 0 AND d.voltage >= 5) AS v_desl_med,
                count(*) FILTER (WHERE d.can_def_level_percent BETWEEN 1 AND 100) AS arla_n,
+               count(*) FILTER (WHERE d.can_def_level_percent > 0) AS arla_total,
                count(*) FILTER (WHERE d.can_def_level_percent <= 5) AS arla_baixo,
                count(*) FILTER (WHERE d.can_def_level_percent BETWEEN 95 AND 100) AS arla_cheio,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY d.can_def_level_percent) FILTER (WHERE d.can_def_level_percent BETWEEN 1 AND 100) AS arla_med
@@ -298,7 +299,8 @@ def _alertas_do_veiculo(v: dict, h: Optional[dict] = None) -> list[dict]:
                                  + (f" O alternador está carregando ({vl:.1f} V com o motor ligado): o problema é a bateria ou consumo com o veículo parado." if vl and vl >= carga else "")})
     # ARLA: mediana de 24 h das leituras acima de 0 (0 o tempo todo = veículo sem sensor de ARLA).
     arla = h.get("arla_med")
-    if "arla" not in suspeitos and arla is not None and h.get("arla_n", 0) >= MIN_LEITURAS and arla < L["arla_min"]:
+    # Maioria acima de 100% = código de "sem informação" (TDP-2E24: 102% o dia todo e um 5% solto).
+    if "arla" not in suspeitos and arla is not None and h.get("arla_n", 0) >= MIN_LEITURAS             and h["arla_n"] >= (h.get("arla_total") or 0) / 2 and arla < L["arla_min"]:
         a.append({"chave": "arla", "titulo": "ARLA 32 no fim", "nivel": "atencao", "valor": f"{arla:.0f}%",
                   "detalhe": f"Nível de ARLA 32 em {arla:.0f}% (mediana de 24 h). Sem ARLA o motor perde potência."})
     # Odômetro travado é qualidade do dado, não defeito do veículo: vai em
