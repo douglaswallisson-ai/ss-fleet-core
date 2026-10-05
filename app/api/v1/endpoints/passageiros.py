@@ -21,7 +21,6 @@ aparece só como contagem, sem fluxo "a bordo".
 
 import time
 from datetime import date, datetime, timedelta
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text

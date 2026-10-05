@@ -1,6 +1,6 @@
 """Pydantic schemas for Driver Performance Reports."""
 
-from datetime import datetime, date
+from datetime import date
 from typing import Optional
 from pydantic import BaseModel, Field
 

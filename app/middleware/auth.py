@@ -3,9 +3,9 @@ Authentication middleware and dependencies.
 Handles JWT and API Key authentication.
 """
 
-from typing import Optional, Union, Set
+from typing import Optional, Set
 from datetime import datetime
-from fastapi import Depends, HTTPException, status, Request
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +18,6 @@ from app.core.access_control import get_user_group_access
 from app.models.user import User
 from app.models.api_key import APIKey
 from app.services.permission_cache import permission_cache
-from app.services.permission_helpers import get_permission_from_request
 
 # Import to set user access in context for automatic filtering
 from app.core.secure_session import set_request_user_access

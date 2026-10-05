@@ -42,7 +42,7 @@ import time
 from collections import defaultdict
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field

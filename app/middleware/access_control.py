@@ -5,8 +5,6 @@ Automatically enforces group/subgroup filters on all database queries.
 
 from contextvars import ContextVar
 from typing import Optional, List, Tuple
-from sqlalchemy import event
-from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -94,7 +92,6 @@ class SecureAsyncSession(AsyncSession):
             Modified statement with access filters applied
         """
         from sqlalchemy.sql.selectable import Select
-        from sqlalchemy import and_, or_
 
         # Only process SELECT statements
         if not isinstance(statement, Select):

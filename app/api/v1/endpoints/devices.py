@@ -13,7 +13,6 @@ from app.core.database import get_db, get_db_read
 from app.core.access_control import build_group_subgroup_filter
 from app.middleware.auth import AuthenticatedUser, require_permission
 from app.models.device import Device
-from app.models.user import User
 from app.models.tracked_unit_device import TrackedUnitDevice
 from app.models.vcms_unit_device import VcmsUnitDevice
 from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceResponse

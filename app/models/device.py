@@ -4,7 +4,6 @@ Represents tracking devices in the fleet management system.
 """
 
 from datetime import datetime
-from typing import Optional
 from sqlalchemy import Column, Integer, String, DateTime, BigInteger
 from app.core.database import Base
 

@@ -8,19 +8,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text, and_, or_, Integer, BigInteger, String, Date, bindparam
+from sqlalchemy import select, text, Integer, BigInteger, String, bindparam
 from sqlalchemy.dialects.postgresql import ARRAY
 from io import StringIO
 import csv
 
-from app.core.database import get_db, get_db_read
+from app.core.database import get_db_read
 from app.core.access_control import build_group_subgroup_filter
-from app.core.query_filters import validate_and_build_access_params, SQLAccessControlBuilder
 from app.api.v1.endpoints.reports_secure import get_secure_driver_report_params
 from app.middleware.auth import AuthenticatedUser, require_permission
-from app.models.history import History
 from app.models.vehicle import Vehicle
-from app.models.telemetry import Telemetry
 from app.schemas.history import (
     HistoryResponse,
     HistoryCursorResponse,
@@ -440,7 +437,6 @@ async def export_dev_status_csv(
     # Helper: Generate daily date ranges for partition processing
     def get_daily_partitions(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
         """Split date range into daily partitions."""
-        from datetime import timedelta
 
         partitions = []
         current = start.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1501,7 +1497,6 @@ async def export_telemetry_csv(
     # Helper: Generate monthly date ranges for partition processing
     def get_monthly_partitions(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
         """Split date range into monthly partitions."""
-        from datetime import timedelta
         from calendar import monthrange
 
         partitions = []

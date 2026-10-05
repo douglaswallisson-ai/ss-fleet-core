@@ -33,7 +33,7 @@ Todos os horários são hora local (as três tabelas gravam em hora de Brasília
 
 import math
 import time
-from datetime import date, timedelta
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query

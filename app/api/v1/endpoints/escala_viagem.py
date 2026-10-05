@@ -34,7 +34,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_read
-from app.core.escopo import clausula_escopo, escopo_do_usuario
+from app.core.escopo import escopo_do_usuario
 from app.middleware.auth import require_permission
 
 router = APIRouter()

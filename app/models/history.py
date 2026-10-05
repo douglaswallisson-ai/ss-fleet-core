@@ -3,8 +3,6 @@ History model - Maps to mova.dev_status_30 table (legacy).
 Stores device status and telemetry data with 30-day retention.
 """
 
-from datetime import datetime
-from typing import Optional
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, BigInteger
 from app.core.database import Base
 

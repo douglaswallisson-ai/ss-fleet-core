@@ -5,8 +5,7 @@ Represents the association between vehicles and tracking devices.
 
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Column, Integer, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, DateTime
 
 from app.core.database import Base
 

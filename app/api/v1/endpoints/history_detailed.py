@@ -13,12 +13,11 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from io import StringIO
 import csv
 
-from app.core.database import get_db, get_db_read
+from app.core.database import get_db_read
 from app.core.access_control import build_group_subgroup_filter
 from app.middleware.auth import AuthenticatedUser, require_permission
 from app.models.vehicle import Vehicle
 from app.schemas.history import (
-    HistoryDetailedResponse,
     HistoryDetailedCursorResponse,
     CompositeCursor,
     UnitInfo,

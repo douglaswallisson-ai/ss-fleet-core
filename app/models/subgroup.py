@@ -1,6 +1,6 @@
 """SQLAlchemy model for Subgroup."""
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, func
 from app.core.database import Base
 
 

@@ -3,8 +3,7 @@ Event model - Represents alerts and events from devices.
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Text, Enum as SQLEnum, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, Float, DateTime, ForeignKey, JSON, Text, Enum as SQLEnum, Boolean
 import enum
 
 from app.core.database import Base

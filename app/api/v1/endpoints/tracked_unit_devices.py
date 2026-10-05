@@ -12,7 +12,7 @@ from typing import List
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_
 
 from app.core.database import get_db, get_db_read
 from app.core.access_control import build_group_subgroup_filter

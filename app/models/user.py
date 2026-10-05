@@ -5,7 +5,6 @@ Uses SHA1 for password validation (compatibility with old system).
 
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, DateTime, Date, Time
-from sqlalchemy.orm import relationship
 from typing import Optional
 
 from app.core.database import Base

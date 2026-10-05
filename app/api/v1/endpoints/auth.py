@@ -3,14 +3,12 @@ Authentication endpoints.
 Handles user login, token refresh, and logout.
 """
 
-from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
 from app.core.security import (
-    verify_password,
     verify_password_sha1,
     create_access_token,
     create_refresh_token,

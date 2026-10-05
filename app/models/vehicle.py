@@ -6,7 +6,6 @@ Represents tracked vehicles/assets in the fleet management system.
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Numeric
-from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 

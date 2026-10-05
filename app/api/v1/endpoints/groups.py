@@ -7,7 +7,7 @@ from typing import List
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
+from sqlalchemy import select
 
 from app.core.database import get_db, get_db_read
 from app.middleware.auth import AuthenticatedUser, require_permission

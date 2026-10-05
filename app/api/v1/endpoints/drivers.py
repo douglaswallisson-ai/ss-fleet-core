@@ -10,12 +10,12 @@ CRUD operations for driver management with business rules:
 6. CNH validation: format (11 digits), expiration tracking, category validation
 """
 
-from typing import List, Optional
+from typing import Optional
 from datetime import datetime, date
 import hashlib
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, case, func
+from sqlalchemy import select, or_, func
 
 from app.core.database import get_db, get_db_read
 from app.core.access_control import build_group_subgroup_filter

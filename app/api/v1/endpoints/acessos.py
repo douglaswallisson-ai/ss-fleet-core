@@ -307,7 +307,6 @@ async def pessoa(
 # (`data/acessos_paginas.sqlite`). A tabela definitiva é decisão da engenharia.
 # ---------------------------------------------------------------------------
 
-import json as _json
 import sqlite3
 import threading
 from pydantic import BaseModel, Field

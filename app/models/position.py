@@ -4,8 +4,7 @@ Optimized for time-series queries with proper indexing.
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Index, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, Float, DateTime, JSON, Index, Boolean
 
 from app.core.database import Base
 

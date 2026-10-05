@@ -5,8 +5,7 @@ Redis-based caching for user permissions to ensure <5ms response time.
 Caches user permissions as sets for fast lookup.
 """
 
-import json
-from typing import Set, Optional, List, Dict
+from typing import Set, Optional, Dict
 from redis import asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
@@ -15,8 +14,6 @@ from app.core.config import settings
 from app.models.api_permissions import (
     ApiUserPermission,
     ApiPermission,
-    ApiAction,
-    ApiResource,
 )
 
 

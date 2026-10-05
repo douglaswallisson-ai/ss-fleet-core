@@ -126,7 +126,7 @@ def build_group_subgroup_filter(group_access: List[Tuple[int, Optional[int]]]):
         Returns filter equivalent to:
         group_id IN (2977)
     """
-    from sqlalchemy import and_, or_
+    from sqlalchemy import and_
 
     if not group_access:
         # No access - return always false condition

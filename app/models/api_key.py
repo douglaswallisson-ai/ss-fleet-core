@@ -4,7 +4,6 @@ API Key model - Represents third-party API access credentials.
 
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON, Text
-from sqlalchemy.orm import relationship
 
 from app.core.database import Base
 

@@ -11,7 +11,7 @@ fora. Devolver um número inventado seria pior que a ausência: ele apareceria n
 relatório de diretoria como se fosse medido.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query

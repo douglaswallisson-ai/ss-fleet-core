@@ -22,8 +22,7 @@ app/models/api_permissions.py):
   popular api_resources/api_actions/api_permissions.
 """
 
-from typing import List, Optional
-from datetime import datetime
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select

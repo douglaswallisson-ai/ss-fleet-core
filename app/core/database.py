@@ -18,7 +18,7 @@ import time
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
-from sqlalchemy.pool import NullPool, QueuePool, AsyncAdaptedQueuePool
+from sqlalchemy.pool import QueuePool, AsyncAdaptedQueuePool
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -295,7 +295,6 @@ async def init_db() -> None:
     """
     async with async_engine.begin() as conn:
         # Import all models to register them with Base
-        from app.models import user, vehicle, device, position, event, api_key
 
         # Create all tables
         await conn.run_sync(Base.metadata.create_all)

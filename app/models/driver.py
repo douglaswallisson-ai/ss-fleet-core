@@ -5,7 +5,7 @@ Maps to mova.driver table.
 Manages driver information including licenses, documents, and credentials.
 """
 
-from datetime import datetime, date
+from datetime import date
 from typing import Optional
 from sqlalchemy import Column, Integer, String, DateTime, Date, Text
 from sqlalchemy.sql import func

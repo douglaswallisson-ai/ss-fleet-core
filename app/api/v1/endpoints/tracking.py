@@ -14,7 +14,6 @@ primeira linha.
 """
 
 from datetime import date, datetime, timedelta
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
