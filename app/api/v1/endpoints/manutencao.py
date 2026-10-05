@@ -12,7 +12,13 @@ Fontes (só leitura no banco):
   qualidade (vault: dev_status-estado-atual-e-qualidade-do-odometro): 0 e
   100.000.000 são inválidos; se inválido, usa `can_total_odometer` (metros).
   Nunca `tracked_unit.initial_odometer` (valor da instalação).
-- Sinais do motor: colunas `can_*`, `voltage` do `dev_status` (última leitura).
+- Sinais do motor: colunas `can_*`, `voltage` do `dev_status` (última leitura),
+  julgados pelas leituras das últimas 24 h (`dev_status_30`): uma leitura só
+  não abre alerta, e sensor que manda valor impossível vira "sinal suspeito"
+  (qualidade do dado), não defeito do veículo. Conferido na CECOTI em
+  05/10/2026: 6 veículos com óleo "44 kPa" idêntico em centenas de leituras
+  com o motor acima de 900 rpm (valor travado), ARLA pulando entre 0, 1, 2 e
+  100% na mesma hora, e tensão de 0 V com o alternador carregando 28,6 V.
 
 ⚠️ ARMAZENAMENTO PROVISÓRIO: planos, serviços feitos e ordens de serviço
 ficam num SQLite local (`data/manutencao.sqlite`) — o banco de produção é só
@@ -60,7 +66,7 @@ AVISO_HORAS = 50
 
 LIMITES = {
     "temp_atencao": 96.0, "temp_critico": 107.0,           # °C — acima da faixa normal / máximo Cummins
-    "oleo_min_kpa": 69.0, "oleo_rpm_min": 900.0,            # kPa, mínimo Cummins em marcha lenta
+    "oleo_min_kpa": 69.0, "oleo_rpm_min": 600.0,            # kPa, mínimo Cummins em marcha lenta (avaliado entre 600 e 899 rpm)
     "rpm_ligado": 500.0,                                    # acima disso o alternador deve estar carregando
     "v24_carga_min": 26.0, "v24_atencao": 24.4, "v24_critico": 24.0,   # sistema 24 V (leitura > 18 V)
     "v12_carga_min": 13.0, "v12_atencao": 12.2, "v12_critico": 12.0,   # sistema 12 V
@@ -180,14 +186,87 @@ async def _frota(group_id: int) -> list[dict]:
 
 # ------------------------------- Alertas -----------------------------------
 
+# Regras de sinal suspeito (sensor, não motor):
+# - óleo com o MESMO valor em todas as leituras com o motor acima de 900 rpm:
+#   pressão de óleo de verdade varia com a rotação;
+# - ARLA que, no mesmo dia, aparece no fim (≤ 5%) e cheio (≥ 95%): nível de
+#   tanque cai devagar e só sobe ao abastecer;
+# - tensão abaixo de 5 V: equipamento sem alimentação ou leitura perdida;
+# - óleo que cai quando a rotação sobe e nunca passa de ~255: o valor estoura
+#   a escala de 1 byte e volta do zero (CECOTI, 05/10/2026: 120–162 kPa entre
+#   1.200 e 1.599 rpm e 24–56 kPa acima de 1.600 rpm, com temperatura normal).
+#   Na frota toda o efeito começa antes: mediana de 184–188 kPa em marcha
+#   lenta (650–899 rpm) e 84–100 kPa entre 900 e 1.499 rpm (CECOTI e Quataí).
+#   Por isso o óleo é julgado só em MARCHA LENTA (600–899 rpm), onde a leitura
+#   não estoura — e é exatamente onde vale o mínimo Cummins de 69 kPa —, com
+#   o motor QUENTE (≥ 75 °C): motor frio tem pressão alta e estoura mesmo em
+#   marcha lenta (QOB-6291: 4 a 248 kPa a 69 °C; mediana de 7 dias 188 kPa).
+MIN_LEITURAS = 10
 
-def _alertas_do_veiculo(v: dict) -> list[dict]:
-    """Sinais fora do normal na última leitura (corretiva). Cada alerta pode virar OS."""
+
+async def _historico_24h(group_id: int) -> dict[int, dict]:
+    rows = await _ler(
+        """
+        SELECT d.unit_id,
+               count(*) FILTER (WHERE d.can_rpm >= 600 AND d.can_engine_oil_pressure > 0) AS oleo_todas,
+               count(DISTINCT d.can_engine_oil_pressure) FILTER (WHERE d.can_rpm >= 600 AND d.can_engine_oil_pressure > 0) AS oleo_valores,
+               max(d.can_engine_oil_pressure) FILTER (WHERE d.can_rpm >= 600) AS oleo_max,
+               count(*) FILTER (WHERE d.can_rpm >= 600 AND d.can_rpm < 900 AND d.can_engine_coolant_temp >= 75 AND d.can_engine_oil_pressure > 0) AS oleo_n,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY d.can_engine_oil_pressure)
+                   FILTER (WHERE d.can_rpm >= 600 AND d.can_rpm < 900 AND d.can_engine_coolant_temp >= 75 AND d.can_engine_oil_pressure > 0) AS oleo_med,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY d.can_engine_oil_pressure)
+                   FILTER (WHERE d.can_rpm >= 1600 AND d.can_engine_oil_pressure > 0) AS oleo_med_alto,
+               count(*) FILTER (WHERE d.can_rpm >= 1600 AND d.can_engine_oil_pressure > 0) AS oleo_n_alto,
+               count(*) FILTER (WHERE d.can_rpm >= 500 AND d.voltage >= 5) AS v_lig_n,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY d.voltage) FILTER (WHERE d.can_rpm >= 500 AND d.voltage >= 5) AS v_lig_med,
+               count(*) FILTER (WHERE coalesce(d.can_rpm, 0) = 0 AND d.voltage >= 5) AS v_desl_n,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY d.voltage) FILTER (WHERE coalesce(d.can_rpm, 0) = 0 AND d.voltage >= 5) AS v_desl_med,
+               count(*) FILTER (WHERE d.can_def_level_percent BETWEEN 1 AND 100) AS arla_n,
+               count(*) FILTER (WHERE d.can_def_level_percent <= 5) AS arla_baixo,
+               count(*) FILTER (WHERE d.can_def_level_percent BETWEEN 95 AND 100) AS arla_cheio,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY d.can_def_level_percent) FILTER (WHERE d.can_def_level_percent BETWEEN 1 AND 100) AS arla_med
+        FROM mova.dev_status_30 d
+        WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
+          AND d.local_time >= now() - interval '24 hours'
+        GROUP BY d.unit_id
+        """,
+        {"g": group_id},
+    )
+    return {r["unit_id"]: {k: (float(v) if v is not None else None) for k, v in dict(r).items() if k != "unit_id"} for r in rows}
+
+
+def _suspeitos(v: dict, h: dict) -> list[dict]:
+    s = []
+    if h.get("oleo_todas", 0) >= MIN_LEITURAS and h.get("oleo_valores") == 1:
+        s.append({"sinal": "oleo", "titulo": "Pressão de óleo travada",
+                  "detalhe": f"O sensor mandou {h['oleo_max']:.0f} kPa em todas as {h['oleo_todas']:.0f} leituras com o motor ligado nas últimas 24 h. Pressão real varia com a rotação: conferir o sensor ou a configuração do CAN."})
+    elif (h.get("oleo_max") or 0) >= 240 and h.get("oleo_n_alto", 0) >= MIN_LEITURAS and h.get("oleo_med") and h.get("oleo_med_alto") is not None             and h["oleo_med_alto"] < h["oleo_med"] / 2:
+        s.append({"sinal": "oleo_escala", "titulo": "Pressão de óleo estourando a escala",
+                  "detalhe": f"Acima de 1.600 rpm a pressão aparece em {h['oleo_med_alto']:.0f} kPa, menos da metade dos {h['oleo_med']:.0f} kPa em marcha lenta, e nunca passa de {h['oleo_max']:.0f}. A pressão real sobe com a rotação: o valor passa de 255 e o equipamento volta do zero. Para alerta vale só a leitura em marcha lenta."})
+    if h.get("arla_baixo", 0) > 0 and h.get("arla_cheio", 0) > 0:
+        s.append({"sinal": "arla", "titulo": "Nível de ARLA inconsistente",
+                  "detalhe": f"Nas últimas 24 h o nível apareceu no fim ({h['arla_baixo']:.0f} leituras com até 5%) e cheio ({h['arla_cheio']:.0f} leituras com 95% ou mais). Conferir o sensor do tanque."})
+    tensao = v.get("voltage")
+    if tensao is not None and tensao < 5:
+        s.append({"sinal": "bateria", "titulo": "Tensão sem leitura",
+                  "detalhe": f"Última leitura de {tensao:.1f} V: equipamento sem alimentação ou leitura perdida."
+                             + (f" Com o motor ligado, nas últimas 24 h, a tensão ficou em {h['v_lig_med']:.1f} V." if h.get("v_lig_med") else "")})
+    return s
+
+
+def _alertas_do_veiculo(v: dict, h: Optional[dict] = None) -> list[dict]:
+    """Sinais fora do normal (corretiva). Cada alerta pode virar OS.
+
+    Temperatura usa a última leitura (superaquecimento é imediato). Óleo,
+    tensão e ARLA usam a mediana das últimas 24 h e são ignorados quando o
+    sensor está suspeito (ver `_suspeitos`)."""
     a = []
     L = LIMITES
+    h = h or {}
     recente = v.get("local_time") and v["local_time"] > datetime.now() - timedelta(hours=6)
     if not recente:
         return a
+    suspeitos = {s["sinal"] for s in _suspeitos(v, h)}
     t = v.get("temp")
     if t is not None and t < 150:
         if t >= L["temp_critico"]:
@@ -196,30 +275,32 @@ def _alertas_do_veiculo(v: dict) -> list[dict]:
         elif t >= L["temp_atencao"]:
             a.append({"chave": "temperatura", "titulo": "Motor quente", "nivel": "atencao", "valor": f"{t:.0f} °C",
                       "detalhe": f"Temperatura em {t:.0f} °C (atenção a partir de {L['temp_atencao']:.0f} °C)."})
-    o, rpm = v.get("oleo"), v.get("rpm")
-    if o is not None and o > 0 and rpm is not None and rpm >= L["oleo_rpm_min"] and o < L["oleo_min_kpa"]:
+    # Óleo: mediana em marcha lenta (600–899 rpm) nas últimas 24 h — acima disso a leitura estoura.
+    o = h.get("oleo_med")
+    if "oleo" not in suspeitos and o is not None and h.get("oleo_n", 0) >= MIN_LEITURAS and o < L["oleo_min_kpa"]:
         a.append({"chave": "oleo", "titulo": "Pressão de óleo baixa", "nivel": "critico", "valor": f"{o:.0f} kPa",
-                  "detalhe": f"Pressão do óleo em {o:.0f} kPa com o motor a {rpm:.0f} rpm (mínimo {L['oleo_min_kpa']:.0f} kPa)."})
-    tensao = v.get("voltage")
-    if tensao is not None:
-        if tensao > 18:
+                  "detalhe": f"Pressão do óleo com mediana de {o:.0f} kPa em {h['oleo_n']:.0f} leituras em marcha lenta com o motor quente nas últimas 24 h (mínimo Cummins em marcha lenta: {L['oleo_min_kpa']:.0f} kPa)."})
+    # Tensão: alternador pela mediana com o motor ligado; bateria pela mediana em repouso.
+    ref = h.get("v_lig_med") or h.get("v_desl_med") or v.get("voltage")
+    if "bateria" not in suspeitos and ref is not None:
+        if ref > 18:
             crit, aten, carga, sist = L["v24_critico"], L["v24_atencao"], L["v24_carga_min"], "24 V"
         else:
             crit, aten, carga, sist = L["v12_critico"], L["v12_atencao"], L["v12_carga_min"], "12 V"
-        ligado = rpm is not None and rpm >= L["rpm_ligado"]
-        if ligado and crit <= tensao < carga:
-            a.append({"chave": "bateria", "titulo": "Alternador sem carregar", "nivel": "atencao", "valor": f"{tensao:.1f} V",
-                      "detalhe": f"Tensão em {tensao:.1f} V com o motor ligado num sistema de {sist}; carregando deveria passar de {carga} V."})
-        elif tensao < crit:
-            a.append({"chave": "bateria", "titulo": "Bateria/alternador", "nivel": "critico", "valor": f"{tensao:.1f} V",
-                      "detalhe": f"Tensão em {tensao:.1f} V num sistema de {sist} (crítico abaixo de {crit} V)."})
-        elif not ligado and tensao < aten:
-            a.append({"chave": "bateria", "titulo": "Tensão baixa", "nivel": "atencao", "valor": f"{tensao:.1f} V",
-                      "detalhe": f"Tensão em {tensao:.1f} V num sistema de {sist} (abaixo de {aten} V a bateria parada está com menos de metade da carga)."})
-    arla = v.get("arla")
-    if arla is not None and arla <= 100 and arla < L["arla_min"]:
+        vl, vd = h.get("v_lig_med"), h.get("v_desl_med")
+        if vl is not None and h.get("v_lig_n", 0) >= MIN_LEITURAS and vl < carga:
+            a.append({"chave": "bateria", "titulo": "Alternador sem carregar", "nivel": "critico" if vl < crit else "atencao", "valor": f"{vl:.1f} V",
+                      "detalhe": f"Com o motor ligado, a tensão ficou em {vl:.1f} V (mediana de 24 h) num sistema de {sist}; carregando deveria passar de {carga} V."})
+        elif vd is not None and h.get("v_desl_n", 0) >= MIN_LEITURAS and vd < aten:
+            # Bateria fraca não para o veículo (o alternador recarrega): atenção, não crítico.
+            a.append({"chave": "bateria", "titulo": "Bateria fraca em repouso", "nivel": "atencao", "valor": f"{vd:.1f} V",
+                      "detalhe": f"Com o motor desligado, a tensão ficou em {vd:.1f} V (mediana de 24 h) num sistema de {sist}; abaixo de {aten} V a bateria tem menos de metade da carga."
+                                 + (f" O alternador está carregando ({vl:.1f} V com o motor ligado): o problema é a bateria ou consumo com o veículo parado." if vl and vl >= carga else "")})
+    # ARLA: mediana de 24 h das leituras acima de 0 (0 o tempo todo = veículo sem sensor de ARLA).
+    arla = h.get("arla_med")
+    if "arla" not in suspeitos and arla is not None and h.get("arla_n", 0) >= MIN_LEITURAS and arla < L["arla_min"]:
         a.append({"chave": "arla", "titulo": "ARLA 32 no fim", "nivel": "atencao", "valor": f"{arla:.0f}%",
-                  "detalhe": f"Nível de ARLA 32 em {arla:.0f}%. Sem ARLA o motor perde potência."})
+                  "detalhe": f"Nível de ARLA 32 em {arla:.0f}% (mediana de 24 h). Sem ARLA o motor perde potência."})
     # Odômetro travado é qualidade do dado, não defeito do veículo: vai em
     # `odometro_travado` (aviso à parte), não aqui — na Fênix seriam 180 "alertas".
     return a
@@ -366,6 +447,7 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
     """Situação de cada veículo: plano, itens vencidos/vencendo, alertas e OS abertas."""
     _grupo_ok(user, group_id)
     frota = await _frota(group_id)
+    historico = await _historico_24h(group_id)
     with _con() as c:
         planos = [{**dict(r), "itens": json.loads(r["itens"])} for r in c.execute("SELECT * FROM plano WHERE group_id = ?", (group_id,))]
         servicos = [dict(r) for r in c.execute("SELECT * FROM servico WHERE group_id = ? ORDER BY data DESC, id DESC", (group_id,))]
@@ -386,7 +468,9 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
             for it in plano["itens"]:
                 itens.append(_situacao_item(it, ultimo.get((v["unit_id"], it["servico"].strip().lower())), v["odometro_km"], v.get("horimetro_h")))
             itens.sort(key=lambda i: (ORDEM_SIT[i["situacao"]], i["falta_km"] if i["falta_km"] is not None else 10**9))
-        alertas = _alertas_do_veiculo(v)
+        hv = historico.get(v["unit_id"], {})
+        alertas = _alertas_do_veiculo(v, hv)
+        suspeitos = _suspeitos(v, hv) if v.get("local_time") and v["local_time"] > datetime.now() - timedelta(hours=6) else []
         oss = os_por_veiculo.get(v["unit_id"], [])
         veiculos.append({
             **{k: v[k] for k in ("unit_id", "placa", "prefixo", "modelo", "ano", "categoria_id", "categoria", "odometro_km", "odometro_travado", "horimetro_h")},
@@ -398,6 +482,7 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
             "vencendo": sum(1 for i in itens if i["situacao"] == "vence_em_breve"),
             "sem_registro": sum(1 for i in itens if i["situacao"] == "sem_registro"),
             "alertas": alertas,
+            "sinais_suspeitos": suspeitos,
             "ordens_abertas": len(oss),
             "alertas_com_os": sorted({(o.get("origem") or "").replace("alerta:", "") for o in oss if (o.get("origem") or "").startswith("alerta:")}),
         })
@@ -406,6 +491,7 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
         "totais": {
             "veiculos": len(veiculos),
             "odometro_travado": sum(1 for v in veiculos if v["odometro_travado"]),
+            "sinais_suspeitos": sum(len(v["sinais_suspeitos"]) for v in veiculos),
             "com_plano": sum(1 for v in veiculos if v["plano"]),
             "itens_vencidos": sum(v["vencidos"] for v in veiculos),
             "veiculos_com_vencido": sum(1 for v in veiculos if v["vencidos"]),
