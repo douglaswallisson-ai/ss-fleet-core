@@ -107,6 +107,14 @@ Padrões repetidos em todos os módulos:
 - Conferir número com o banco por SQL de leitura antes de dizer que está certo,
   e comparar com o relatório antigo quando houver.
 - Erro de import: `python -c "import app.api.v1.endpoints.<modulo>"`.
+- **Testes de regra (sem banco, rodar sempre):**
+  `.venv\Scripts\python.exe -m pytest tests/test_regras_manutencao.py tests/test_regras_combustivel.py -q`.
+  Cada caso reproduz uma situação real (CECOTI, RCA…). Regra nova = caso novo.
+- **Sinais × banco:** `scripts/validar_sinais.py` (lê o banco, só leitura) antes
+  de afirmar a alguém que um alerta está certo.
+- ⚠️ **NÃO rodar os testes antigos** (`test_devices_api`, `test_vehicles_api`,
+  `test_api_permissions`, `test_database`…): o `conftest.py` usa o banco de
+  produção e eles criam/apagam registros. Só com um banco de teste separado.
 
 ## 5. Mapa das pastas
 
