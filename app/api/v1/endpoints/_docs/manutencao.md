@@ -28,8 +28,11 @@ Uma leitura só não abre alerta: óleo, tensão e ARLA usam a **mediana das
 - **ARLA**: mediana das leituras acima de 0 (0 o tempo todo = sem sensor).
 
 **Sinal suspeito** (`sinais_suspeitos`, aviso à parte, não abre alerta): óleo com o mesmo valor em todas as leituras com o motor ligado (CECOTI: 20 veículos em 44 kPa); óleo estourando a escala; ARLA no fim e cheio no mesmo dia (pula 0/1/2/100%); tensão < 5 V.
-Resultado na CECOTI: de 17 alertas (8 críticos) para 8 alertas sem crítico + 47 sinais suspeitos.
-SUPOSIÇÃO: RCA tem óleo coerente mas baixo em marcha lenta (20–64 kPa); o limite de 69 kPa é Cummins e o modelo do motor não está no cadastro — confirmar a marca antes de concluir.
+Revisão de 05/10/2026 (validador independente em 7 clientes, 1.288 veículos):
+- **Óleo inconclusivo**: se o sensor chegou a ≥ 240 kPa (`OLEO_TETO`) nos últimos 7 dias, leitura baixa em marcha lenta não abre alerta — a escala de 1 byte estoura e volta do zero (RCA: o mesmo caminhão com ~30 kPa num dia e ~200 kPa no outro). Vira sinal suspeito. Mínimo de 10 leituras.
+- **ARLA sem leitura válida**: maioria das leituras com 102% (código "sem informação", J1939 SPN 1761 0xFF × 0,4) vira sinal suspeito; o valor solto no meio (ex.: 5%) não é o nível. CECOTI: 12 VW quebraram juntos entre 12h40 e 12h44 de 30/09/2026 (mudança no equipamento); TDP-2E24 tinha 41% antes.
+- **Tensão com folga de medição**: a leitura é da alimentação do rastreador. Alerta só com folga: alternador < 25,5 V (24 V) / 12,8 V (12 V) com o motor ligado; repouso < 24,0 V / 12,0 V.
+- Lição: alerta só sai depois de olhar o histórico de 10 dias atrás de quebra (mudança brusca), não só a regra do dia.
 
 ## Planos e vencimento
 - Item do plano: a cada X km, Y dias e/ou Z horas. Aviso antes: `AVISO_KM = 1000`, `AVISO_DIAS = 15`, `AVISO_HORAS = 50`.
