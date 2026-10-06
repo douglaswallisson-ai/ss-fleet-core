@@ -35,6 +35,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
+from app.core import combustivel as plaus
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
 
@@ -260,8 +261,25 @@ async def distancia_horimetro(group_id: int = Query(...), inicio: date = Query(.
               WHERE x.unit_id IN (SELECT id FROM un) AND x.local_time >= :ini AND x.local_time < :fim
               WINDOW w AS (PARTITION BY x.unit_id ORDER BY x.local_time)) d JOIN un ON un.id = d.unit_id
         GROUP BY d.unit_id, d.local_time::date ORDER BY 2, 4""", p)
+    # Combustível do dia (pedido da CECOTI: "Distância por Semana" com o consumo junto).
+    # Mesma regra de litros válidos do resto da plataforma (app/core/combustivel.py).
+    comb = await _ler(f"""SELECT h.unit_id, h.dt::date AS dia,
+               sum({plaus.litros_ml('h')}) / 1000.0 AS litros,
+               sum({plaus.km_com_combustivel_m('h')}) / 1000.0 AS km_comb,
+               count(*) FILTER (WHERE h.used_fuel_hist > 0 AND NOT {plaus.valido('h')}) AS litros_descartados
+        FROM mova.con_driver_h_km h
+        WHERE h.group_id = :g AND h.dt >= :ini AND h.dt < :fim {"AND h.unit_id = :u" if unit_id else ""}
+        GROUP BY 1, 2""", p)
+    por_dia = {(c["unit_id"], str(c["dia"])): c for c in comb}
     descartes = []
     for d in dias:
+        c = por_dia.get((d["unit_id"], str(d["dia"])))
+        litros = float(c["litros"]) if c and c["litros"] else None
+        d["litros"] = round(litros, 1) if litros else None
+        d["km_comb"] = round(float(c["km_comb"]), 1) if litros and c["km_comb"] else None
+        d["km_l"] = round(d["km_comb"] / litros, 2) if d["km_comb"] else None
+        if c and c["litros_descartados"]:
+            descartes.append({"placa": d["placa"], "dia": d["dia"], "motivo": "combustível impossível no dia (fora da soma)"})
         km = d.pop("km")
         mins = d.pop("min_can")
         mins = mins if mins is not None else d.pop("min_eq")
@@ -276,6 +294,64 @@ async def distancia_horimetro(group_id: int = Query(...), inicio: date = Query(.
     r = {"dias": dias, "descartes": descartes}
     _CACHE[k] = (time.time(), r)
     return r
+
+
+# ------------------------------------------------ velocidade limite × excessos
+# Pedido da CECOTI (30/01/2026): "como estão configurados os parâmetros de
+# Velocidade Limite, para cada unidade, e também para os Subgrupos?" — o número
+# de excessos do BI parecia não bater. O vault (00-Perguntas-para-o-Time, C7)
+# registra que há três limites sem regra clara de qual vale: grupo
+# (`group.max_speed`), veículo (`tracked_unit.max_speed`, 0 = sem limite) e o
+# do equipamento (`device_config` max_speed / max_road_speed). Aqui os três
+# aparecem lado a lado, com os excessos do período (`con_driver_h_km`, a mesma
+# fonte do BI), para a revisão do cadastro. Só leitura.
+
+@router.get("/velocidade-limite")
+async def velocidade_limite(group_id: int = Query(...), inicio: date = Query(...), fim: date = Query(...),
+                            user=Depends(require_permission("reports", "read"))):
+    p = _params(user, group_id, inicio, fim, 31)
+    k = ("vel", group_id, inicio, fim)
+    if (hit := _cache(k, None)) is not None:
+        return hit
+    rows = await _ler("""
+        SELECT tu.id AS unit_id, tu.label AS placa, tu.label2 AS prefixo, sg.name AS subgrupo,
+               nullif(tu.max_speed, 0) AS limite_veiculo, nullif(g.max_speed, 0) AS limite_grupo,
+               max(dc.value) FILTER (WHERE dc.key = 'max_speed') AS limite_equipamento,
+               max(dc.value) FILTER (WHERE dc.key = 'max_road_speed') AS limite_rodovia_equipamento,
+               coalesce(e.excessos, 0) AS excessos, coalesce(e.seco, 0) AS excessos_seco, coalesce(e.chuva, 0) AS excessos_chuva,
+               coalesce(e.km, 0) AS km
+        FROM mova.tracked_unit tu
+        JOIN mova."group" g ON g.id = tu.group_id
+        LEFT JOIN mova.subgroup sg ON sg.id = tu.subgroup_id
+        LEFT JOIN mova.tracked_unit_device tud ON tud.tracked_unit_id = tu.id AND tud.status = 1 AND tud.device_primary = 1
+        LEFT JOIN mova.device_config dc ON dc.device_id = tud.device_id AND dc.key IN ('max_speed', 'max_road_speed')
+        LEFT JOIN (SELECT unit_id,
+                          sum(coalesce(count_speed_excess_dry_l1, 0) + coalesce(count_speed_excess_dry_l2, 0) + coalesce(count_speed_excess_dry_l3, 0)
+                              + coalesce(count_speed_excess_wet_l1, 0) + coalesce(count_speed_excess_wet_l2, 0) + coalesce(count_speed_excess_wet_l3, 0)) AS excessos,
+                          sum(coalesce(count_speed_excess_dry_l1, 0) + coalesce(count_speed_excess_dry_l2, 0) + coalesce(count_speed_excess_dry_l3, 0)) AS seco,
+                          sum(coalesce(count_speed_excess_wet_l1, 0) + coalesce(count_speed_excess_wet_l2, 0) + coalesce(count_speed_excess_wet_l3, 0)) AS chuva,
+                          sum(distance_traveled_hist) / 1000.0 AS km
+                   FROM mova.con_driver_h_km WHERE group_id = :g AND dt >= :ini AND dt < :fim GROUP BY 1) e ON e.unit_id = tu.id
+        WHERE tu.group_id = :g AND tu.status = 1
+        GROUP BY tu.id, tu.label, tu.label2, sg.name, tu.max_speed, g.max_speed, e.excessos, e.seco, e.chuva, e.km
+        ORDER BY coalesce(e.excessos, 0) DESC, tu.label""", p)
+    for r in rows:
+        km = float(r["km"] or 0)
+        r["km"] = round(km, 1) if 0 <= km <= KM_DIA_MAX * 31 else None
+        r["excessos_por_100km"] = round(100 * r["excessos"] / km, 2) if km >= 50 and r["km"] is not None else None
+        lims = {x for x in (r["limite_veiculo"], r["limite_grupo"], _num(r["limite_equipamento"])) if x}
+        r["situacao"] = ("sem_limite" if not lims else "divergente" if len(lims) > 1 else "ok")
+    resumo = {s: sum(1 for r in rows if r["situacao"] == s) for s in ("ok", "divergente", "sem_limite")}
+    r = {"veiculos": rows, "resumo": resumo, "excessos": sum(int(r["excessos"]) for r in rows)}
+    _CACHE[k] = (time.time(), r)
+    return r
+
+
+def _num(v):
+    try:
+        return float(str(v).replace(",", ".")) if v not in (None, "") else None
+    except ValueError:
+        return None
 
 
 # ------------------------------------------------- configurações do veículo
