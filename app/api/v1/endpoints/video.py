@@ -6,8 +6,9 @@ O `ss-fleet-core` só tinha o vínculo veículo↔equipamento
 veículos têm câmera, qual o estado de comunicação de cada uma, e quais
 ocorrências aguardam tratativa.
 
-As ocorrências de vídeo vivem em `fleet_events`, filtradas pelos tipos que a
-câmera gera. Separar num recurso próprio é decisão de produto: quem cuida de
+As ocorrências de vídeo vêm de `vcms.vcms_history`, onde o serviço da câmera
+grava cada alarme (antes vinham de `fleet_events`, vazia em produção — achado
+de 06/10/2026). Separar num recurso próprio é decisão de produto: quem cuida de
 segurança embarcada trabalha com uma fila diferente de quem cuida de alarme
 operacional, e misturar as duas faz as duas serem ignoradas.
 """
@@ -19,6 +20,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.camera import JOIN_TIPO, NOME_SQL, categoria_sql, severidade_video, tipo_video
 from app.core.database import get_db_read
 from app.core.logging import get_logger
 from app.middleware.auth import require_permission
@@ -32,22 +34,6 @@ from app.schemas.video import (
 
 logger = get_logger(__name__)
 router = APIRouter()
-
-#: Tipos gerados por câmera embarcada. A lista fica aqui, e não no banco,
-#: porque é classificação de produto: o mesmo `event_type` pode ser tratado
-#: como vídeo numa operação e como alarme comum em outra.
-TIPOS_DMS = (
-    "distracao", "olhos_fechados", "bocejo", "fadiga", "celular",
-    "fumando", "sem_rosto",
-)
-TIPOS_ADAS = (
-    "colisao", "risco_colisao", "proximidade_dianteira",
-    "curva_brusca", "freada_brusca", "aceleracao_brusca",
-)
-TIPOS_EQUIPAMENTO = (
-    "calibracao_anormal", "desconexao_eletrica", "baixa_voltagem", "falha_gravacao",
-)
-TIPOS_VIDEO = TIPOS_DMS + TIPOS_ADAS + TIPOS_EQUIPAMENTO
 
 #: Sem comunicação além disto, o equipamento é tratado como offline. Vinte
 #: minutos porque o intervalo normal de posição é bem menor, e uma janela curta
@@ -138,8 +124,14 @@ async def list_video_occurrences(
 
     A categoria separa o que é comportamento do motorista (DMS), o que é risco
     de condução (ADAS) e o que é falha do próprio equipamento. A terceira
-    importa: calibração anormal e baixa voltagem não são problema do motorista,
-    e misturá-las na mesma lista faz o gestor cobrar a pessoa errada.
+    importa: obstrução da câmera e imagem com exceção não são problema do
+    motorista, e misturá-las na mesma lista faz o gestor cobrar a pessoa errada.
+
+    Fonte: `vcms.vcms_history` (somente leitura). DMS/ADAS pelo `alarm_source`,
+    nome e gravidade pelo catálogo `vcms_alarm_type` (ver app/core/camera.py).
+    "Tratada" é a verificação feita na plataforma atual (`verified` > 0, com
+    quem e quando). Ocorrência sem veículo — câmera já desassociada — fica de
+    fora: sem veículo não há como aplicar o escopo do usuário.
     """
     if not start_date:
         start_date = datetime.now() - timedelta(days=7)
@@ -147,49 +139,51 @@ async def list_video_occurrences(
         end_date = datetime.now()
 
     grupos_oc, subgrupos_oc = escopo_do_usuario(current_user)
-
-    tipos = {
-        "dms": TIPOS_DMS,
-        "adas": TIPOS_ADAS,
-        "equipamento": TIPOS_EQUIPAMENTO,
-    }.get(category or "", TIPOS_VIDEO)
-
-    where = [
-        "e.timestamp >= :start",
-        "e.timestamp <= :end",
-        "e.event_type::text = ANY(:tipos)",
-    ]
-    params: dict = {
-        "start": start_date, "end": end_date, "tipos": list(tipos),
-        "limit": limit, "offset": offset,
-    }
-
-    if vehicle_id is not None:
-        where.append("e.vehicle_id = :vehicle_id")
-        params["vehicle_id"] = vehicle_id
-    if only_pending:
-        where.append("e.acknowledged IS NOT TRUE")
-
     escopo_sql_oc, escopo_params_oc = clausula_escopo(grupos_oc, subgrupos_oc, alias="tu")
-    params.update(escopo_params_oc)
 
-    clausula = " AND ".join(where) + escopo_sql_oc
+    params: dict = {"start": start_date, "end": end_date, "limit": limit, "offset": offset, **escopo_params_oc}
+    filtro_veiculo = ""
+    if vehicle_id is not None:
+        filtro_veiculo = " AND h.unit_id = :vehicle_id"
+        params["vehicle_id"] = vehicle_id
+
+    # Filtros sobre a classificação ficam fora da CTE: a categoria é calculada nela.
+    fora = ["TRUE"]
+    if category in ("dms", "adas", "equipamento"):
+        fora.append("oc.category = :category")
+        params["category"] = category
+    if only_pending:
+        fora.append("NOT oc.acknowledged")
+    where = " AND ".join(fora)
+
+    base = f"""
+        WITH oc AS (
+            SELECT
+                h.id, h.unit_id AS vehicle_id, h.local_time AS timestamp,
+                h.latitude::float AS latitude, h.longitude::float AS longitude,
+                {NOME_SQL} AS nome,
+                {categoria_sql()} AS category,
+                h.alarm_type, h.alarm_source, h.alarm_level, h.device_model_id, h.device,
+                h.speed, NULLIF(TRIM(h.driver_name), '') AS motorista, NULLIF(TRIM(h.address), '') AS endereco,
+                COALESCE(h.verified, 0) AS verified, COALESCE(h.verified, 0) > 0 AS acknowledged,
+                h.user_verified AS acknowledged_by, h.date_verified AS acknowledged_at,
+                h.images, h.videos,
+                tu.label AS vehicle_label, tu.label2 AS vehicle_prefix
+            FROM vcms.vcms_history h
+            {JOIN_TIPO}
+            JOIN mova.tracked_unit tu ON tu.id = h.unit_id
+            WHERE h.local_time >= :start AND h.local_time <= :end{filtro_veiculo}{escopo_sql_oc}
+        )
+    """
 
     rows = (
         await db.execute(
             text(
-                f"""
-                SELECT
-                    e.id, e.vehicle_id, e.event_type, e.severity, e.timestamp,
-                    e.description, e.latitude, e.longitude, e.data,
-                    e.acknowledged, e.acknowledged_by, e.acknowledged_at,
-                    tu.label  AS vehicle_label,
-                    tu.label2 AS vehicle_prefix,
-                    COUNT(*) OVER () AS total_count
-                FROM mova.fleet_events e
-                JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
-                WHERE {clausula}
-                ORDER BY e.timestamp DESC
+                f"""{base}
+                SELECT oc.*, COUNT(*) OVER () AS total_count
+                FROM oc
+                WHERE {where}
+                ORDER BY oc.timestamp DESC, oc.id DESC
                 LIMIT :limit OFFSET :offset
                 """
             ),
@@ -200,45 +194,55 @@ async def list_video_occurrences(
     resumo = (
         await db.execute(
             text(
-                f"""
+                f"""{base}
                 SELECT
                     COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE e.acknowledged IS NOT TRUE) AS pending,
-                    COUNT(*) FILTER (WHERE e.event_type::text = ANY(:dms))   AS dms,
-                    COUNT(*) FILTER (WHERE e.event_type::text = ANY(:adas))  AS adas,
-                    COUNT(*) FILTER (WHERE e.event_type::text = ANY(:equip)) AS equipment,
-                    COUNT(DISTINCT e.vehicle_id) AS vehicles
-                FROM mova.fleet_events e
-                JOIN mova.tracked_unit tu ON tu.id = e.vehicle_id
-                WHERE {clausula}
+                    COUNT(*) FILTER (WHERE NOT oc.acknowledged)          AS pending,
+                    COUNT(*) FILTER (WHERE oc.category = 'dms')          AS dms,
+                    COUNT(*) FILTER (WHERE oc.category = 'adas')         AS adas,
+                    COUNT(*) FILTER (WHERE oc.category = 'equipamento')  AS equipment,
+                    COUNT(DISTINCT oc.vehicle_id)                         AS vehicles
+                FROM oc
+                WHERE {where}
                 """
             ),
-            {
-                **{k: v for k, v in params.items() if k not in ("limit", "offset")},
-                "dms": list(TIPOS_DMS),
-                "adas": list(TIPOS_ADAS),
-                "equip": list(TIPOS_EQUIPAMENTO),
-            },
+            {k: v for k, v in params.items() if k not in ("limit", "offset")},
         )
     ).mappings().first()
-
-    def categoria(tipo: str | None) -> str:
-        if tipo in TIPOS_DMS:
-            return "dms"
-        if tipo in TIPOS_ADAS:
-            return "adas"
-        if tipo in TIPOS_EQUIPAMENTO:
-            return "equipamento"
-        return "outro"
 
     return VideoOccurrenceListResponse(
         items=[
             VideoOccurrenceResponse(
-                **{k: v for k, v in r.items() if k != "total_count"},
-                category=categoria(r["event_type"]),
-                # O clipe é referenciado na carga do evento pelo worker de
-                # download; sem ele, não há mídia para exibir.
-                has_clip=bool((r["data"] or {}).get("clip_url") or (r["data"] or {}).get("media_id")),
+                id=r["id"],
+                vehicle_id=r["vehicle_id"],
+                vehicle_label=r["vehicle_label"],
+                vehicle_prefix=r["vehicle_prefix"],
+                event_type=tipo_video(r["nome"]),
+                category=r["category"],
+                severity=severidade_video(r["nome"]),
+                timestamp=r["timestamp"],
+                description=r["nome"],
+                latitude=r["latitude"],
+                longitude=r["longitude"],
+                data={
+                    "alarm_type": r["alarm_type"],
+                    "alarm_source": r["alarm_source"],
+                    "alarm_level": r["alarm_level"],
+                    "device_model_id": r["device_model_id"],
+                    "device": r["device"],
+                    "speed": r["speed"],
+                    "driver_name": r["motorista"],
+                    "address": r["endereco"],
+                    # 0 = não verificada; os demais códigos vêm da plataforma atual.
+                    "verified": r["verified"],
+                    "images": list(r["images"] or []),
+                    "videos": list(r["videos"] or []),
+                },
+                # Sem vídeo baixado não há o que revisar.
+                has_clip=bool(r["videos"]),
+                acknowledged=r["acknowledged"],
+                acknowledged_by=r["acknowledged_by"],
+                acknowledged_at=r["acknowledged_at"],
             )
             for r in rows
         ],

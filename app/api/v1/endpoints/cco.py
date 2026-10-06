@@ -11,9 +11,9 @@ Fontes (só leitura):
   categoria → ícone caminhão/ônibus/van), `vcms_unit_device` (tem câmera);
 - segurança (equipamento): `dev_status_30.tracker_event_id`, gravidade da
   `timeline.py` (CRITICOS) + pânico (11) e furto de combustível (440);
-- câmera (ADAS/DMS): `vcms.vcms_history` + `vcms_alarm_type` — o id do tipo
-  muda por modelo de equipamento, então a gravidade sai do NOME (tabela
-  aprovada: fadiga, celular, olhos fechados, colisão = crítico);
+- câmera (ADAS/DMS): `vcms.vcms_history` + `vcms_alarm_type` pela chave
+  (type, modelo, source) — ver app/core/camera.py; a gravidade sai do NOME
+  (tabela aprovada: fadiga, celular, olhos fechados, colisão = crítico);
 - alarmes do Monitor: `mova.alarm_violation` + `alarm.level` (3 = alto = crítico);
 - manutenção: as mesmas regras validadas de manutencao.py (só com uma empresa
   escolhida — o cálculo é por grupo).
@@ -41,6 +41,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.api.v1.endpoints import manutencao as man
+from app.core.camera import JOIN_TIPO, NOME_SQL, gravidade_camera
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
 
@@ -63,22 +64,10 @@ EVENTOS = {
     11: ("Pânico ativado", "critico"), 440: ("Furto de combustível", "critico"),
     161: ("Faixa amarela", "moderado"), 359: ("Curva brusca", "moderado"), 148: ("Excesso de embreagem", "moderado"),
 }
-CAM_CRITICO = ("fadiga", "celular", "olhos fechados", "colis", "frenagem autom", "embriaguez", "alcool", "álcool")
-CAM_EQUIPAMENTO = ("obstru", "imagem com exce", "óculos bloqueadores", "oculos bloqueadores")
 
 
 def _so_digitos_nome(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
-
-
-def gravidade_camera(nome: str) -> tuple[str, str]:
-    """(fonte, gravidade) de um evento de câmera pelo nome. Tabela aprovada pelo PM em 06/10/2026."""
-    n = (nome or "").lower()
-    if any(t in n for t in CAM_EQUIPAMENTO):
-        return "equipamento", "moderado"
-    if any(t in n for t in CAM_CRITICO):
-        return "camera", "critico"
-    return "camera", "moderado"
 
 
 def tipo_icone(categoria_id: Optional[int]) -> str:
@@ -167,9 +156,9 @@ GROUP BY 1, 2
 """
 
 SQL_CAMERA = """
-SELECT h.unit_id, coalesce(t.name, 'Evento de câmera ' || h.alarm_type) AS nome, count(*) AS n,
+SELECT h.unit_id, {nome} AS nome, count(*) AS n,
        max(h.local_time) AS ultimo, max(h.speed) AS vel_max
-FROM vcms.vcms_history h LEFT JOIN vcms.vcms_alarm_type t ON t.id = h.alarm_type
+FROM vcms.vcms_history h {join_tipo}
 WHERE h.local_time >= :desde AND h.unit_id IN (SELECT id FROM mova.tracked_unit WHERE status = 1 {filtro})
 GROUP BY 1, 2
 """
@@ -227,7 +216,7 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
         p = {"grupos": grupos or [], "desde": desde, "codigos": list(EVENTOS)}
         veics = await _ler(SQL_VEICULOS.format(filtro=_filtro(grupos, "tu.")), p)
         evs = await _ler(SQL_EVENTOS.format(filtro=_filtro(grupos)), p)
-        cams = await _ler(SQL_CAMERA.format(filtro=_filtro(grupos)), p)
+        cams = await _ler(SQL_CAMERA.format(filtro=_filtro(grupos), nome=NOME_SQL, join_tipo=JOIN_TIPO), p)
         alrs = await _ler(SQL_ALARMES.format(filtro=_filtro(grupos)), p)
         manut = await _manutencao(grupos[0]) if grupos and len(grupos) == 1 else []
         dados = {"veics": veics, "evs": evs, "cams": cams, "alrs": alrs, "manut": manut, "manut_ok": bool(grupos and len(grupos) == 1)}

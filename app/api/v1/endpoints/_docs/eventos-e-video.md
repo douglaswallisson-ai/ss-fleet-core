@@ -3,13 +3,21 @@
 Telas: `push-it-on-over/src/screens/Eventos.tsx` (Segurança › Eventos; mostra 40
 e carrega +60) e `Videotelemetria.tsx`.
 
-- `fleet_events` é gravada pelo `ss-worker-alarm-analyze`; aqui só leitura.
-- `POST /events/{id}/acknowledge` **grava em produção** — não usar enquanto o
-  banco for só leitura (a tela não chama).
+- `fleet_events` está **vazia** em produção (06/10/2026). Desde então:
+  - `GET /events/` lê `mova.alarm_violation` + `mova.alarm` (todos os disparos do
+    intervalo; `severity` pelo `level`: 3 CRITICAL, 2 WARNING, 1 INFO; "reconhecido"
+    = visto ou tratado no Monitor da plataforma atual). `/events/alarmes` continua
+    sendo o recorte do Monitor (só `notif_monitor`, alarme ativo, conta do usuário).
+  - `GET /video/occurrences` lê `vcms.vcms_history`; nome do tipo por
+    (type, device_model_id, source) em `vcms_alarm_type` — ver `app/core/camera.py`.
+    O id sozinho erra o nome (ADAS "Veículo Muito Próximo" saía como "Fumando").
+    DMS/ADAS pelo `alarm_source`; "tratada" = `verified` > 0. Sem veículo, fica de fora.
+- `POST /events/{id}/acknowledge` responde **501** sem tocar no banco (os ids agora
+  são de `alarm_violation`; a tratativa é feita no Monitor da plataforma atual).
 - Vídeo: câmeras com estado de comunicação (offline após 20 min) e ocorrências
-  DMS/ADAS/equipamento (`TIPOS_DMS`, `TIPOS_ADAS`, `TIPOS_EQUIPAMENTO`).
-  Alarme de saúde da câmera ("calibração anormal", "baixa voltagem") fica
-  separado do comportamento do motorista — não cobrar a pessoa errada.
+  DMS/ADAS/equipamento. Alarme de saúde da câmera (obstrução, imagem com exceção,
+  óculos bloqueadores de IV) fica separado do comportamento do motorista — não
+  cobrar a pessoa errada.
 - A lista de eventos com local vem de `bi.py /eventos/lista` (`heatmap`).
 
 ## Vídeo ao vivo — `cameras.py` (05/10/2026)
