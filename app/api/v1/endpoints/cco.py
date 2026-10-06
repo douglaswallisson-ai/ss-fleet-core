@@ -42,6 +42,7 @@ from sqlalchemy import text
 
 from app.api.v1.endpoints import manutencao as man
 from app.core.camera import JOIN_TIPO, NOME_SQL, gravidade_camera
+from app.core import areas_risco, geo
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
 
@@ -307,6 +308,8 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
             "critico" if minutos >= PARADO_LIGADO_CRITICO_MIN else "moderado", 1, e["desde"],
             (f"há {minutos // 60} h {minutos % 60:02d} min" if minutos >= 60 else f"há {minutos} min") + sem_rpm)
 
+    await _avisos_de_rota(dados["veics"], grupos, agora, add)
+
     por_unidade: dict[int, list[dict]] = {}
     for a in avisos:
         por_unidade.setdefault(a["unit_id"], []).append(a)
@@ -316,7 +319,10 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
         lt = v["local_time"]
         sem_com = not lt or (agora - lt) > timedelta(hours=SEM_COMUNICACAO_H)
         ig = bool(v["ignicao"]) and not sem_com
-        vel = float(v["velocidade"] or 0) if ig else 0.0
+        # Velocidade só vale com posição recente: a leitura de 2 h atrás com 54 km/h deixava o carro
+        # "em movimento" no telão (TZM-4E88, 06/10/2026).
+        recente = bool(lt) and (agora - lt) <= timedelta(minutes=POSICAO_RECENTE_MIN)
+        vel = float(v["velocidade"] or 0) if ig and recente else 0.0
         meus = por_unidade.get(v["unit_id"], [])
         veiculos.append({
             "id": v["unit_id"], "placa": v["placa"],
@@ -339,6 +345,86 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
         "veiculos": veiculos, "avisos": avisos[:8000], "avisos_total": len(avisos),
         "manutencao_disponivel": dados["manut_ok"], "janela_horas": horas, "atualizado_em": agora.isoformat(timespec="seconds"),
     }
+
+
+#: Sem posição há mais que isso, o carro não conta como em movimento.
+POSICAO_RECENTE_MIN = 30
+#: Parada fora do lugar: a menos disto de um ponto da programação ainda é "no lugar".
+RAIO_PONTO_PROGRAMADO_M = 300
+
+
+async def _avisos_de_rota(veics: list[dict], grupos: Optional[list[int]], agora: datetime, add) -> None:
+    """Área de risco, desvio de rota e parada fora do lugar (PM/CEO, 06/10/2026).
+
+    - Área de risco: veículo comunicando dentro de uma área "evitar" do próprio cliente.
+    - Desvio de rota: veículo com programação em execução, andando, com TODAS as leituras dos
+      últimos `desvio_min` minutos a mais de `tolerancia_m` do caminho programado.
+    - Parada fora do lugar: parado há `parada_max_min` minutos fora do caminho, longe dos pontos
+      da programação e fora de qualquer cerca do cliente (garagem, cliente, posto…).
+    Visto/Tratado vale para o dia (a chave leva a data), como os avisos de manutenção.
+    """
+    hoje = agora.date().isoformat()
+    fim_do_dia = hoje + "T23:59:59"
+    vivos = {v["unit_id"]: v for v in veics if v["local_time"] and (agora - v["local_time"]) <= timedelta(minutes=30)}
+
+    areas = [a for a in await areas_risco.areas(grupos) if a["nivel"] == "evitar"]
+    for v in vivos.values():
+        for a in areas:
+            if a["group_id"] == v["group_id"] and any(geo.dentro(v["lat"], v["lng"], anel) for anel in a["aneis"]):
+                add(f"risco:{v['unit_id']}:{a['chave']}:{hoje}", v["unit_id"], "Em área de risco", "seguranca", "critico", 1,
+                    fim_do_dia, a["nome"] + (f" · {a['motivo']}" if a.get("motivo") else ""), estado=True)
+
+    progs = [p for p in areas_risco.programacoes(grupos, so_ativas=True) if p["unit_id"] in vivos and areas_risco.em_execucao(p, agora)]
+    if not progs:
+        return
+    # Os rastreadores mandam posição a cada ~2 min andando e menos parados: a janela cobre folgado.
+    janela = max(max(p["desvio_min"] * 2 + 4, p["parada_max_min"] + 30) for p in progs)
+    leit = await _ler("""SELECT unit_id, local_time, latitude::float AS lat, longitude::float AS lng, coalesce(speed, 0) AS vel
+                         FROM mova.dev_status_30 WHERE unit_id = ANY(CAST(:u AS int[])) AND local_time >= :d
+                           AND latitude IS NOT NULL AND latitude <> 0 ORDER BY local_time""",
+                      {"u": [p["unit_id"] for p in progs], "d": agora - timedelta(minutes=janela)})
+    por_u: dict[int, list[dict]] = {}
+    for x in leit:
+        por_u.setdefault(x["unit_id"], []).append(x)
+
+    candidatos = []
+    for p in progs:
+        linha = geo.simplificar(p["trajeto"], 800)
+        ls = por_u.get(p["unit_id"], [])
+        for x in ls:
+            x["dist"] = geo.dist_ponto_linha_m(x["lat"], x["lng"], linha)
+        v = vivos[p["unit_id"]]
+        d_agora = geo.dist_ponto_linha_m(v["lat"], v["lng"], linha)
+        # Desvio: as últimas leituras seguidas fora da rota, cobrindo pelo menos `desvio_min` minutos.
+        fora = []
+        for x in reversed(ls):
+            if x["dist"] <= p["tolerancia_m"]:
+                break
+            fora.append(x)
+        cobre_desvio = len(fora) >= 2 and (fora[0]["local_time"] - fora[-1]["local_time"]) >= timedelta(minutes=p["desvio_min"]) - timedelta(seconds=20)
+        if cobre_desvio and float(v["velocidade"] or 0) > 3 and d_agora > p["tolerancia_m"]:
+            add(f"desvio:{p['id']}:{hoje}", p["unit_id"], "Desvio de rota", "operacao", "critico", 1, fim_do_dia,
+                f"a {round(d_agora)} m da rota {p['nome']}", estado=True)
+            continue
+        # Parada: parado desde a última leitura em movimento (sem nenhuma na janela, desde o início dela).
+        ult_mov = max((x["local_time"] for x in ls if x["vel"] > 3), default=None)
+        parado_desde = ult_mov or (agora - timedelta(minutes=janela))
+        if float(v["velocidade"] or 0) <= 3 and agora - parado_desde >= timedelta(minutes=p["parada_max_min"]) and d_agora > p["tolerancia_m"] \
+                and all(geo.haversine_m(v["lat"], v["lng"], q["latitude"], q["longitude"]) > RAIO_PONTO_PROGRAMADO_M for q in p["pontos"]):
+            candidatos.append((p, v, d_agora))
+    if not candidatos:
+        return
+    # Dentro de uma cerca do cliente (garagem, cliente, posto…) é lugar permitido.
+    pts = ",".join(f"({i}, {v['lng']:.6f}, {v['lat']:.6f}, {v['group_id']})" for i, (_, v, _) in enumerate(candidatos))
+    dentro = {r["i"] for r in await _ler(f"""
+        SELECT x.i FROM (VALUES {pts}) AS x(i, lng, lat, g)
+        WHERE EXISTS (SELECT 1 FROM mova.cerca c WHERE c.status = 1 AND c.group_id = x.g
+                        AND ST_Intersects(({areas_risco.GEO_CERCA}), ST_SetSRID(ST_MakePoint(x.lng, x.lat), 4326)))""", {})}
+    for i, (p, v, d) in enumerate(candidatos):
+        if i in dentro:
+            continue
+        add(f"parada:{p['id']}:{hoje}", p["unit_id"], "Parada fora do lugar", "operacao", "moderado", 1, fim_do_dia,
+            f"parado há mais de {p['parada_max_min']} min a {round(d)} m da rota {p['nome']}", estado=True)
 
 
 @router.get("/veiculo/{unit_id}")

@@ -92,6 +92,17 @@ class Settings(BaseSettings):
         default="",
         description="Servidor OSRM (malha viária) da roteirização. Vazio = estimativa por linha reta. Ver roteirizacao.py.",
     )
+    ROTEADOR: str = Field(
+        default="",
+        description="Motor de rotas com desvio de áreas de risco: aws | here | valhalla (vazio = estimativa). Ver app/core/roteador.py.",
+    )
+    AWS_LOCATION_API_KEY: str = Field(
+        default="",
+        description="Chave de API do Amazon Location Service (Routes v2). Segredo: só no .env.",
+    )
+    AWS_LOCATION_REGION: str = Field(default="sa-east-1", description="Região do Amazon Location Service.")
+    HERE_API_KEY: str = Field(default="", description="Chave da HERE Routing v8. Segredo: só no .env.")
+    VALHALLA_URL: str = Field(default="", description="Servidor Valhalla próprio (OpenStreetMap), ex.: http://valhalla:8002")
     JIMI_PROXY_URL: str = Field(
         default="",
         description="API Gateway do proxy JIMI (câmeras JC450): status online e abrir vídeo ao vivo. Ver cameras.py.",

@@ -24,3 +24,4 @@ data/contratos.sqlite
 data/estoque.sqlite
 data/estoque_base.json
 data/cco.sqlite
+data/rotas.sqlite
