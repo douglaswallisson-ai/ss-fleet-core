@@ -707,6 +707,9 @@ class Gravacao(BaseModel):
 async def criar(tipo: str, g_: Gravacao, user=Depends(require_permission("reports", "read"))):
     _grupo_ok(user, g_.group_id)
     t = _tipo(tipo)
+    if tipo == "empresa":
+        # Regra do PM (06/10/2026): grupo novo só nasce pelo cadastro de contrato (contratos.py).
+        raise HTTPException(409, {"message": "Grupo novo só pelo cadastro de contrato (Console › Contratos › Novo contrato).", "field": "nome"})
     if t.so_ss_cria and not getattr(user, "is_super_admin", False):
         raise HTTPException(403, f"Só a SS cria {t.nome.lower()}.")
     dados = {k: v for k, v in g_.dados.items() if k not in ("id", "origem", "origem_id", "provisorio", "editado_em")}
