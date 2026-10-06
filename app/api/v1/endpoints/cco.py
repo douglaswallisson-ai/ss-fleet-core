@@ -61,7 +61,8 @@ EVENTOS = {
     7: ("Excesso de velocidade", "moderado"), 9: ("Freada brusca", "moderado"), 153: ("Aceleração brusca", "moderado"),
     163: ("Faixa vermelha", "moderado"), 13: ("Movimento sem tração", "moderado"), 27: ("Alimentação desconectada", "critico"),
     37: ("Excesso de velocidade na chuva", "critico"), 48: ("Motorista não autorizado", "critico"), 288: ("Parado acelerando", "moderado"),
-    11: ("Pânico ativado", "critico"), 440: ("Furto de combustível", "moderado"),
+    11: ("Pânico ativado", "critico"),
+    # 440 "Furto de combustível" fora do painel: muito sensível, alarme falso (PM, 06/10/2026).
     161: ("Faixa amarela", "moderado"), 359: ("Curva brusca", "moderado"), 148: ("Excesso de embreagem", "moderado"),
 }
 #: PM, 06/10/2026: excesso de velocidade e aceleração brusca são moderados (acontecem o tempo
@@ -70,7 +71,7 @@ EVENTOS = {
 # PM, 06/10/2026 (2ª decisão): os eventos frequentes de condução e o furto de combustível
 # (20 veículos da CECOTI em 2 h — detecção do equipamento) são moderados e viram crítico a
 # partir de 50 ocorrências na janela.
-ESCALAM_PARA_CRITICO = {7: 50, 153: 50, 9: 50, 163: 50, 13: 50, 288: 50, 440: 50}
+ESCALAM_PARA_CRITICO = {7: 50, 153: 50, 9: 50, 163: 50, 13: 50, 288: 50}
 
 
 def gravidade_evento(cod: int, n: int) -> str:
