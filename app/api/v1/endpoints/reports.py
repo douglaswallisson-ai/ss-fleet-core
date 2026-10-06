@@ -789,7 +789,12 @@ async def get_driver_km_fuel_hours_cursor(
                         ELSE 0 END)
                 END / 1000 AS NUMERIC(10,2)) AS distance_traveled_hist_filtrado,
                 CASE WHEN COALESCE(SUM(hk.used_fuel_hist), 0) = 0 THEN true ELSE false END AS is_estimated,
-                ROW_NUMBER() OVER (ORDER BY hk.dt DESC, hk.unit_id, hk.driver_id) AS row_id
+                ROW_NUMBER() OVER (ORDER BY hk.dt DESC, hk.unit_id, hk.driver_id) AS row_id,
+                -- Regra única da plataforma (app/core/combustivel.py), a mesma do Gerencial e do
+                -- ranking: km real (sem trocar pelo estimado) e litros/km só com combustível possível.
+                CAST(SUM(hk.distance_traveled_hist) / 1000 AS NUMERIC(12,2)) AS km_real,
+                CAST(SUM(CASE WHEN (hk.used_fuel_hist > 0 AND hk.used_fuel_hist <= 1200000 AND NOT (hk.used_fuel_hist > 100000 AND hk.distance_traveled_hist < 0.5 * hk.used_fuel_hist)) THEN hk.used_fuel_hist ELSE 0 END) / 1000 AS NUMERIC(12,2)) AS litros_validos,
+                CAST(SUM(CASE WHEN (hk.used_fuel_hist > 0 AND hk.used_fuel_hist <= 1200000 AND NOT (hk.used_fuel_hist > 100000 AND hk.distance_traveled_hist < 0.5 * hk.used_fuel_hist)) THEN hk.distance_traveled_hist ELSE 0 END) / 1000 AS NUMERIC(12,2)) AS km_com_combustivel
             FROM
                 mova.con_driver_h_km hk
             WHERE
@@ -805,7 +810,7 @@ async def get_driver_km_fuel_hours_cursor(
         SELECT
             dt, "label", unit_id, group_id, subgroup_id, driver, driver_id,
             distance_traveled_hist, used_fuel_hist, time_traveled_hist, distance_traveled_hist_filtrado,
-            is_estimated, row_id
+            is_estimated, row_id, km_real, litros_validos, km_com_combustivel
         FROM ranked_data
         WHERE (
             :cursor_dt IS NULL
@@ -859,7 +864,10 @@ async def get_driver_km_fuel_hours_cursor(
             used_fuel_hist=row[8],
             time_traveled_hist=row[9],
             distance_traveled_hist_filtrado=row[10],
-            is_estimated=row[11]
+            is_estimated=row[11],
+            km_real=row[13],
+            litros_validos=row[14],
+            km_com_combustivel=row[15],
         )
         for row in rows
     ]

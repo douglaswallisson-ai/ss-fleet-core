@@ -46,6 +46,10 @@ class DriverKmFuelHoursResponse(BaseModel):
     time_traveled_hist: float = Field(..., description="Time traveled in hours")
     distance_traveled_hist_filtrado: float = Field(..., description="Filtered distance (only when fuel > 0 and < 500L)")
     is_estimated: bool = Field(False, description="True if estimated data was used (when actual fuel = 0 or NULL)")
+    # Regra única da plataforma (app/core/combustivel.py) — use estes para km/l nas telas.
+    km_real: Optional[float] = Field(None, description="Km real do dia (sem trocar pelo estimado)")
+    litros_validos: Optional[float] = Field(None, description="Litros só das linhas com combustível possível")
+    km_com_combustivel: Optional[float] = Field(None, description="Km das linhas com combustível possível (base do km/l)")
 
     model_config = {"from_attributes": True}
 
