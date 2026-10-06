@@ -177,6 +177,31 @@ WHERE h.local_time >= :desde AND h.unit_id IN (SELECT id FROM mova.tracked_unit 
 GROUP BY 1, 2
 """
 
+# Parado com motor ligado há muito tempo (PM, 06/10/2026). Na CECOTI, em 05/10/2026: 120 paradas
+# ligadas acima de 15 min, 37 acima de 30 min e 6 acima de 1 h — a partir de 30 min para não poluir o telão.
+PARADO_LIGADO_MIN = 30
+PARADO_LIGADO_CRITICO_MIN = 60
+SQL_PARADO_LIGADO = """
+WITH agora AS (
+    SELECT s.unit_id, s.local_time FROM mova.dev_status s JOIN mova.tracked_unit tu ON tu.id = s.unit_id
+    WHERE tu.status = 1 {filtro} AND s.ignition AND coalesce(s.speed, 0) <= 3 AND s.local_time >= now() - interval '30 minutes')
+-- :pl_desde = agora − 3 h, calculado no Python: com `now() - interval` o banco não descarta as
+-- partições diárias do dev_status_30 e a consulta passava de 50 s na frota toda.
+-- Conta da primeira leitura LIGADA e PARADA depois da última vez que andou ou desligou
+-- (31222, 06/10/2026: desligado das 19:44 às 20:23 aparecia como "parado ligado há 38 min").
+, h AS (
+    SELECT d.unit_id, d.local_time, (d.speed > 3 OR NOT d.ignition) AS quebra, coalesce(nullif(d.can_rpm, 0), d.rpm, 0) AS rpm
+    FROM mova.dev_status_30 d WHERE d.local_time >= :pl_desde AND d.unit_id IN (SELECT unit_id FROM agora))
+, q AS (SELECT unit_id, max(local_time) FILTER (WHERE quebra) AS q FROM h GROUP BY 1)
+SELECT a.unit_id, a.local_time,
+       coalesce(min(h.local_time) FILTER (WHERE NOT h.quebra AND (q.q IS NULL OR h.local_time > q.q)), a.local_time) AS desde,
+       -- Rotação: o carro manda rpm (tem_rpm) mas ficou em 0 na parada = ignição ligada com motor desligado.
+       coalesce(max(h.rpm), 0) > 0 AS tem_rpm,
+       coalesce(max(h.rpm) FILTER (WHERE NOT h.quebra AND (q.q IS NULL OR h.local_time > q.q)), 0) AS rpm_parado
+FROM agora a LEFT JOIN q ON q.unit_id = a.unit_id LEFT JOIN h ON h.unit_id = a.unit_id
+GROUP BY a.unit_id, a.local_time
+"""
+
 SQL_ALARMES = """
 SELECT av.unit_id, a.name AS nome, coalesce(a.level, 1) AS nivel, count(*) AS n, max(av.initial_time) AS ultimo
 FROM mova.alarm_violation av JOIN mova.alarm a ON a.id = av.alarm_id
@@ -232,8 +257,9 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
         evs = await _ler(SQL_EVENTOS.format(filtro=_filtro(grupos)), p)
         cams = await _ler(SQL_CAMERA.format(filtro=_filtro(grupos), nome=NOME_SQL, join_tipo=JOIN_TIPO), p)
         alrs = await _ler(SQL_ALARMES.format(filtro=_filtro(grupos)), p)
+        plig = await _ler(SQL_PARADO_LIGADO.format(filtro=_filtro(grupos, "tu.")), {**p, "pl_desde": datetime.now() - timedelta(hours=3)})
         manut = await _manutencao(grupos[0]) if grupos and len(grupos) == 1 else []
-        dados = {"veics": veics, "evs": evs, "cams": cams, "alrs": alrs, "manut": manut, "manut_ok": bool(grupos and len(grupos) == 1)}
+        dados = {"veics": veics, "evs": evs, "cams": cams, "alrs": alrs, "manut": manut, "plig": plig, "manut_ok": bool(grupos and len(grupos) == 1)}
         _CACHE[chave_cache] = (time.time(), dados)
 
     with _trava, _con() as c:
@@ -266,6 +292,20 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
     for e in dados["manut"]:
         # Alerta de manutenção é estado, não ocorrência: Visto vale para o dia.
         add(f"man:{e['unit_id']}:{e['chave_extra']}", e["unit_id"], e["nome"], "manutencao", e["gravidade"], 1, hoje + "T23:59:59", e["detalhe"], estado=True)
+
+    for e in dados.get("plig", []):
+        if not e["desde"]:
+            continue
+        minutos = int((e["local_time"] - e["desde"]).total_seconds() // 60)
+        if minutos < PARADO_LIGADO_MIN:
+            continue
+        if e["tem_rpm"] and not e["rpm_parado"]:
+            continue  # chave virada, motor desligado: não é marcha lenta
+        sem_rpm = "" if e["tem_rpm"] else " · ignição ligada, sem leitura de rotação"
+        # Chave pela hora em que parou: Visto vale para esta parada; a próxima abre de novo.
+        add(f"pl:{e['unit_id']}:{_iso(e['desde'])}", e["unit_id"], "Parado com motor ligado", "operacao",
+            "critico" if minutos >= PARADO_LIGADO_CRITICO_MIN else "moderado", 1, e["desde"],
+            (f"há {minutos // 60} h {minutos % 60:02d} min" if minutos >= 60 else f"há {minutos} min") + sem_rpm)
 
     por_unidade: dict[int, list[dict]] = {}
     for a in avisos:
@@ -339,6 +379,7 @@ class Marcar(BaseModel):
     ate: str       # horário da última ocorrência vista (ISO)
     unit_id: int
     nota: Optional[str] = None
+    nome: Optional[str] = None  # nome do aviso, para a lista de ocorrências do turno
 
 
 @router.post("/avisos/{chave:path}/marcar")
@@ -354,9 +395,35 @@ async def marcar(chave: str, p: Marcar, user=Depends(require_permission("reports
     with _trava, _con() as c:
         c.execute("INSERT OR REPLACE INTO marcacao (chave, unit_id, situacao, ate, por, por_nome, nota, em) VALUES (?,?,?,?,?,?,?,?)",
                   (chave, p.unit_id, p.situacao, p.ate, getattr(user, "user_id", None), nome, p.nota, agora))
-        c.execute("INSERT INTO historico (chave, unit_id, situacao, ate, nota, por, por_nome, em) VALUES (?,?,?,?,?,?,?,?)",
-                  (chave, p.unit_id, p.situacao, p.ate, p.nota, getattr(user, "user_id", None), nome, agora))
+        if "aviso" not in {x[1] for x in c.execute("PRAGMA table_info(historico)")}:
+            c.execute("ALTER TABLE historico ADD COLUMN aviso TEXT")
+        c.execute("INSERT INTO historico (chave, unit_id, situacao, ate, nota, por, por_nome, em, aviso) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (chave, p.unit_id, p.situacao, p.ate, p.nota, getattr(user, "user_id", None), nome, agora, p.nome))
     return {"ok": True}
+
+
+@router.get("/turno")
+async def turno(desde: datetime = Query(...), group_id: Optional[int] = Query(None), user=Depends(require_permission("reports", "read"))):
+    """Ocorrências tratadas no turno (quem marcou o quê), para a passagem de turno."""
+    grupos = _grupos_do_usuario(user, group_id)
+    with _trava, _con() as c:
+        if "aviso" not in {x[1] for x in c.execute("PRAGMA table_info(historico)")}:
+            c.execute("ALTER TABLE historico ADD COLUMN aviso TEXT")
+        rows = [dict(r) for r in c.execute("SELECT * FROM historico WHERE em >= ? ORDER BY id DESC LIMIT 1000", (desde.isoformat(),))]
+    if not rows:
+        return {"data": []}
+    veics = await _ler("SELECT id, label AS placa, label2 AS prefixo, group_id FROM mova.tracked_unit WHERE id = ANY(CAST(:ids AS int[]))",
+                       {"ids": list({r["unit_id"] for r in rows if r["unit_id"]})})
+    por_id = {v["id"]: v for v in veics if grupos is None or v["group_id"] in grupos}
+    out = []
+    for r in rows:
+        v = por_id.get(r["unit_id"])
+        if not v:
+            continue
+        pref = v["prefixo"] if v["prefixo"] and len(v["prefixo"]) <= 10 else v["placa"]
+        out.append({"em": r["em"], "situacao": r["situacao"], "por": r["por_nome"], "nota": r["nota"],
+                    "aviso": r.get("aviso"), "unit_id": r["unit_id"], "veiculo": pref, "placa": v["placa"]})
+    return {"data": out}
 
 
 @router.get("/avisos/historico")
