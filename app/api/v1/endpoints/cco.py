@@ -1,0 +1,358 @@
+"""
+Painel CCO — a operação em tempo real numa tela só (fase 2: dado real).
+
+Especificação combinada com o PM em 06/10/2026 (memória "painel-cco"):
+cor do carro (vermelho crítico, amarelo moderado, verde andando, cinza parado),
+wifi vermelho só sem comunicação > 2 h, avisos sem som que saem só com Visto
+ou Tratado, SS vê todos os clientes e o cliente só a operação dele.
+
+Fontes (só leitura):
+- veículos: `mova.dev_status` (estado atual), `tracked_unit` (placa, prefixo,
+  categoria → ícone caminhão/ônibus/van), `vcms_unit_device` (tem câmera);
+- segurança (equipamento): `dev_status_30.tracker_event_id`, gravidade da
+  `timeline.py` (CRITICOS) + pânico (11) e furto de combustível (440);
+- câmera (ADAS/DMS): `vcms.vcms_history` + `vcms_alarm_type` — o id do tipo
+  muda por modelo de equipamento, então a gravidade sai do NOME (tabela
+  aprovada: fadiga, celular, olhos fechados, colisão = crítico);
+- alarmes do Monitor: `mova.alarm_violation` + `alarm.level` (3 = alto = crítico);
+- manutenção: as mesmas regras validadas de manutencao.py (só com uma empresa
+  escolhida — o cálculo é por grupo).
+Achado (06/10/2026): `mova.fleet_events`, que Eventos e Videotelemetria usam,
+está VAZIA; as ocorrências reais de câmera estão em `vcms.vcms_history`.
+
+Janela: avisos das últimas `horas` (padrão 2; o painel deixa escolher 1, 2, 6 ou 12).
+Agrupamento: o equipamento gera muito evento (10 mil acelerações bruscas em 12
+h). Um aviso = veículo + tipo, com a contagem e o horário do último. Visto ou
+Tratado grava a hora; só ocorrências depois dela reabrem o aviso. As marcações
+ficam no armazenamento provisório `data/cco.sqlite`.
+"""
+
+import re
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import text
+
+from app.api.v1.endpoints import manutencao as man
+from app.core.database import AsyncSessionLocalReplica
+from app.middleware.auth import require_permission
+
+router = APIRouter()
+
+ARQUIVO = Path(__file__).resolve().parents[4] / "data" / "cco.sqlite"
+_trava = threading.Lock()
+_CACHE: dict[tuple, tuple[float, object]] = {}
+#: Janela padrão dos avisos. Com 12 h, 84 dos 132 carros da CECOTI ficavam vermelhos (06/10/2026).
+JANELA_PADRAO_H = 2
+SEM_COMUNICACAO_H = 2
+CACHE_S = 25
+CACHE_MANUT_S = 300
+
+#: Eventos do equipamento no painel (nome, gravidade). Críticos = timeline.py + pânico e furto (PM, 06/10/2026).
+EVENTOS = {
+    7: ("Excesso de velocidade", "critico"), 9: ("Freada brusca", "critico"), 153: ("Aceleração brusca", "critico"),
+    163: ("Faixa vermelha", "critico"), 13: ("Movimento sem tração", "critico"), 27: ("Alimentação desconectada", "critico"),
+    37: ("Excesso de velocidade na chuva", "critico"), 48: ("Motorista não autorizado", "critico"), 288: ("Parado acelerando", "critico"),
+    11: ("Pânico ativado", "critico"), 440: ("Furto de combustível", "critico"),
+    161: ("Faixa amarela", "moderado"), 359: ("Curva brusca", "moderado"), 148: ("Excesso de embreagem", "moderado"),
+}
+CAM_CRITICO = ("fadiga", "celular", "olhos fechados", "colis", "frenagem autom", "embriaguez", "alcool", "álcool")
+CAM_EQUIPAMENTO = ("obstru", "imagem com exce", "óculos bloqueadores", "oculos bloqueadores")
+
+
+def _so_digitos_nome(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def gravidade_camera(nome: str) -> tuple[str, str]:
+    """(fonte, gravidade) de um evento de câmera pelo nome. Tabela aprovada pelo PM em 06/10/2026."""
+    n = (nome or "").lower()
+    if any(t in n for t in CAM_EQUIPAMENTO):
+        return "equipamento", "moderado"
+    if any(t in n for t in CAM_CRITICO):
+        return "camera", "critico"
+    return "camera", "moderado"
+
+
+def tipo_icone(categoria_id: Optional[int]) -> str:
+    """Categoria do cadastro → ícone (mesma regra de iconesVeiculo.ts, com van separada)."""
+    if categoria_id in (12, 22):
+        return "onibus"
+    if categoria_id == 15:
+        return "van"
+    if categoria_id in (1, 2, 10, 14):
+        return "carro"
+    if categoria_id == 9:
+        return "moto"
+    if categoria_id in (5, 6, 8, 23):
+        return "maquina"
+    return "caminhao"
+
+
+def cor_do_carro(avisos_abertos: list[dict], ignicao: bool, velocidade: float) -> str:
+    if any(a["gravidade"] == "critico" for a in avisos_abertos):
+        return "vermelho"
+    if avisos_abertos:
+        return "amarelo"
+    return "verde" if ignicao and (velocidade or 0) > 3 else "cinza"
+
+
+# ------------------------------------------------------------- armazenamento
+
+@contextmanager
+def _con():
+    ARQUIVO.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(ARQUIVO)
+    c.row_factory = sqlite3.Row
+    c.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS marcacao (chave TEXT PRIMARY KEY, unit_id INTEGER, situacao TEXT NOT NULL,
+            ate TEXT NOT NULL, por INTEGER, por_nome TEXT, nota TEXT, em TEXT);
+        CREATE TABLE IF NOT EXISTS historico (id INTEGER PRIMARY KEY AUTOINCREMENT, chave TEXT, unit_id INTEGER,
+            situacao TEXT, ate TEXT, nota TEXT, por INTEGER, por_nome TEXT, em TEXT);
+        """
+    )
+    try:
+        with c:
+            yield c
+    finally:
+        c.close()
+
+
+# ------------------------------------------------------------------ escopo
+
+def _grupos_do_usuario(user, group_id: Optional[int]) -> Optional[list[int]]:
+    """None = todos (só a SS). Cliente: só os grupos dele."""
+    ss = getattr(user, "master", 0) or getattr(user, "is_super_admin", False)
+    if ss:
+        return [group_id] if group_id else None
+    meus = sorted({g for g, _ in (getattr(user, "group_access", None) or []) if g})
+    if group_id:
+        if group_id not in meus:
+            raise HTTPException(403, "Sem acesso a esta empresa.")
+        return [group_id]
+    if not meus:
+        raise HTTPException(403, "Usuário sem empresa.")
+    return meus
+
+
+SQL_VEICULOS = """
+SELECT tu.id AS unit_id, tu.label AS placa, tu.label2 AS prefixo, tu.unit_category_id AS categoria_id, tu.group_id,
+       g.name AS empresa, s.local_time, s.latitude::float AS lat, s.longitude::float AS lng, s.direction AS rumo,
+       s.ignition AS ignicao, s.speed AS velocidade, coalesce(nullif(s.can_rpm, 0), nullif(s.rpm, 0)) AS rpm,
+       s.faixa, fx.name AS faixa_nome, s.altitude, s.can_engine_coolant_temp AS temperatura,
+       s.can_fuel_level_percent AS combustivel, s.driver_name AS motorista, s.address AS endereco,
+       EXISTS (SELECT 1 FROM vcms.vcms_unit_device v WHERE v.unit_id = tu.id AND v.status = 1 AND v.release_date IS NULL) AS tem_camera
+FROM mova.tracked_unit tu
+JOIN mova.dev_status s ON s.unit_id = tu.id
+LEFT JOIN mova."group" g ON g.id = tu.group_id
+LEFT JOIN mova.faixas fx ON fx.id = s.faixa
+WHERE tu.status = 1 AND s.latitude IS NOT NULL AND s.latitude <> 0 {filtro}
+"""
+
+SQL_EVENTOS = """
+SELECT d.unit_id, d.tracker_event_id AS cod, count(*) AS n, max(d.local_time) AS ultimo, min(d.local_time) AS primeiro,
+       max(d.speed) AS vel_max
+FROM mova.dev_status_30 d
+WHERE d.local_time >= :desde AND d.tracker_event_id = ANY(CAST(:codigos AS int[]))
+  AND d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE status = 1 {filtro})
+GROUP BY 1, 2
+"""
+
+SQL_CAMERA = """
+SELECT h.unit_id, coalesce(t.name, 'Evento de câmera ' || h.alarm_type) AS nome, count(*) AS n,
+       max(h.local_time) AS ultimo, max(h.speed) AS vel_max
+FROM vcms.vcms_history h LEFT JOIN vcms.vcms_alarm_type t ON t.id = h.alarm_type
+WHERE h.local_time >= :desde AND h.unit_id IN (SELECT id FROM mova.tracked_unit WHERE status = 1 {filtro})
+GROUP BY 1, 2
+"""
+
+SQL_ALARMES = """
+SELECT av.unit_id, a.name AS nome, coalesce(a.level, 1) AS nivel, count(*) AS n, max(av.initial_time) AS ultimo
+FROM mova.alarm_violation av JOIN mova.alarm a ON a.id = av.alarm_id
+WHERE av.initial_time >= :desde AND av.unit_id IN (SELECT id FROM mova.tracked_unit WHERE status = 1 {filtro})
+GROUP BY 1, 2, 3
+"""
+
+
+def _filtro(grupos: Optional[list[int]], alias: str = "") -> str:
+    if grupos is None:
+        return ""
+    return f" AND {alias}group_id = ANY(CAST(:grupos AS int[]))"
+
+
+async def _ler(sql: str, p: dict) -> list[dict]:
+    async with AsyncSessionLocalReplica() as db:
+        await db.execute(text("SET LOCAL statement_timeout = '60s'"))
+        return [dict(r) for r in (await db.execute(text(sql), p)).mappings().all()]
+
+
+async def _manutencao(grupo: int) -> list[dict]:
+    """Alertas de manutenção do grupo (regras validadas de manutencao.py), com cache de 5 min."""
+    k = ("manut", grupo)
+    hit = _CACHE.get(k)
+    if hit and time.time() - hit[0] < CACHE_MANUT_S:
+        return hit[1]  # type: ignore[return-value]
+    frota = await man._frota(grupo)
+    hist = await man._historico_24h(grupo)
+    out = []
+    for v in frota:
+        for a in man._alertas_do_veiculo(v, hist.get(v["unit_id"], {})):
+            out.append({"unit_id": v["unit_id"], "nome": a["titulo"], "gravidade": "critico" if a["nivel"] == "critico" else "moderado",
+                        "detalhe": a.get("valor") or a.get("detalhe") or "", "chave_extra": a["chave"]})
+    _CACHE[k] = (time.time(), out)
+    return out
+
+
+def _iso(v):
+    return v.isoformat() if hasattr(v, "isoformat") else v
+
+
+@router.get("/painel")
+async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANELA_PADRAO_H, ge=1, le=12), user=Depends(require_permission("reports", "read"))):
+    grupos = _grupos_do_usuario(user, group_id)
+    chave_cache = ("painel", tuple(grupos) if grupos else None, horas)
+    hit = _CACHE.get(chave_cache)
+    if hit and time.time() - hit[0] < CACHE_S:
+        dados = hit[1]
+    else:
+        desde = datetime.now() - timedelta(hours=horas)
+        p = {"grupos": grupos or [], "desde": desde, "codigos": list(EVENTOS)}
+        veics = await _ler(SQL_VEICULOS.format(filtro=_filtro(grupos, "tu.")), p)
+        evs = await _ler(SQL_EVENTOS.format(filtro=_filtro(grupos)), p)
+        cams = await _ler(SQL_CAMERA.format(filtro=_filtro(grupos)), p)
+        alrs = await _ler(SQL_ALARMES.format(filtro=_filtro(grupos)), p)
+        manut = await _manutencao(grupos[0]) if grupos and len(grupos) == 1 else []
+        dados = {"veics": veics, "evs": evs, "cams": cams, "alrs": alrs, "manut": manut, "manut_ok": bool(grupos and len(grupos) == 1)}
+        _CACHE[chave_cache] = (time.time(), dados)
+
+    with _trava, _con() as c:
+        marcas = {r["chave"]: dict(r) for r in c.execute("SELECT * FROM marcacao")}
+
+    agora = datetime.now()
+    avisos: list[dict] = []
+
+    def add(chave: str, unit_id: int, nome: str, fonte: str, grav: str, n: int, ultimo, detalhe: str = "", estado: bool = False):
+        m = marcas.get(chave)
+        if m and ultimo and _iso(ultimo) <= m["ate"]:
+            return  # visto/tratado e nada novo depois
+        # `ate` é o que o Visto grava; aviso de estado (manutenção) não tem horário de ocorrência.
+        avisos.append({"id": chave, "unit_id": unit_id, "nome": nome, "fonte": fonte, "gravidade": grav, "quantidade": int(n),
+                       "ultimo": None if estado else _iso(ultimo), "ate": _iso(ultimo), "detalhe": detalhe,
+                       "reaberto": bool(m), "marcado_antes": m["situacao"] if m else None})
+
+    for e in dados["evs"]:
+        nome, grav = EVENTOS[e["cod"]]
+        add(f"ev:{e['unit_id']}:{e['cod']}", e["unit_id"], nome, "seguranca", grav, e["n"], e["ultimo"],
+            f"velocidade máx. {round(e['vel_max'])} km/h" if e["cod"] == 7 and e["vel_max"] else "")
+    for e in dados["cams"]:
+        fonte, grav = gravidade_camera(e["nome"])
+        add(f"cam:{e['unit_id']}:{_so_digitos_nome(e['nome']).lower()}", e["unit_id"], _so_digitos_nome(e["nome"]), fonte, grav, e["n"], e["ultimo"])
+    for e in dados["alrs"]:
+        add(f"alm:{e['unit_id']}:{_so_digitos_nome(e['nome']).lower()}", e["unit_id"], _so_digitos_nome(e["nome"]), "seguranca",
+            "critico" if int(e["nivel"]) >= 3 else "moderado", e["n"], e["ultimo"], "alarme do Monitor")
+    hoje = agora.date().isoformat()
+    for e in dados["manut"]:
+        # Alerta de manutenção é estado, não ocorrência: Visto vale para o dia.
+        add(f"man:{e['unit_id']}:{e['chave_extra']}", e["unit_id"], e["nome"], "manutencao", e["gravidade"], 1, hoje + "T23:59:59", e["detalhe"], estado=True)
+
+    por_unidade: dict[int, list[dict]] = {}
+    for a in avisos:
+        por_unidade.setdefault(a["unit_id"], []).append(a)
+
+    veiculos = []
+    for v in dados["veics"]:
+        lt = v["local_time"]
+        sem_com = not lt or (agora - lt) > timedelta(hours=SEM_COMUNICACAO_H)
+        ig = bool(v["ignicao"]) and not sem_com
+        vel = float(v["velocidade"] or 0) if ig else 0.0
+        meus = por_unidade.get(v["unit_id"], [])
+        veiculos.append({
+            "id": v["unit_id"], "placa": v["placa"],
+            "prefixo": v["prefixo"] if v["prefixo"] and len(v["prefixo"]) <= 10 else v["placa"],
+            "descricao": v["prefixo"] if v["prefixo"] and len(v["prefixo"]) > 10 else None, "empresa": v["empresa"], "group_id": v["group_id"],
+            "tipo": tipo_icone(v["categoria_id"]), "lat": v["lat"], "lng": v["lng"], "rumo": v["rumo"],
+            "ignicao": ig, "velocidade": round(vel), "rpm": int(v["rpm"]) if ig and v["rpm"] else None,
+            "faixa": (v["faixa_nome"] or "").capitalize() if ig and v["faixa_nome"] and v["faixa"] != 8 else None,
+            "altitude": round(float(v["altitude"])) if v["altitude"] not in (None, 0) else None,
+            "temperatura": round(float(v["temperatura"])) if ig and v["temperatura"] and 0 < float(v["temperatura"]) < 150 else None,
+            "combustivel": round(float(v["combustivel"])) if v["combustivel"] and 0 < float(v["combustivel"]) <= 100 else None,
+            "motorista": v["motorista"] if v["motorista"] and "não informado" not in v["motorista"].lower() else None,
+            "endereco": v["endereco"], "ultima_comunicacao": _iso(lt), "comunicando": not sem_com, "tem_camera": bool(v["tem_camera"]),
+            "cor": cor_do_carro(meus, ig, vel),
+        })
+    ids = {v["id"] for v in veiculos}
+    avisos = [a for a in avisos if a["unit_id"] in ids]
+    avisos.sort(key=lambda a: (a["gravidade"] != "critico", -(datetime.fromisoformat(str(a["ultimo"])).timestamp() if a["ultimo"] else agora.timestamp())))
+    return {
+        "veiculos": veiculos, "avisos": avisos[:8000], "avisos_total": len(avisos),
+        "manutencao_disponivel": dados["manut_ok"], "janela_horas": horas, "atualizado_em": agora.isoformat(timespec="seconds"),
+    }
+
+
+@router.get("/veiculo/{unit_id}")
+async def veiculo(unit_id: int, user=Depends(require_permission("reports", "read"))):
+    """Dados do card: consumo médio dos últimos minutos (pelo totalizador de combustível, em mL)."""
+    rows = await _ler("SELECT group_id FROM mova.tracked_unit WHERE id = :u", {"u": unit_id})
+    if not rows:
+        raise HTTPException(404, "Veículo não encontrado.")
+    _grupos_do_usuario(user, rows[0]["group_id"])
+    leit = await _ler("""SELECT local_time, can_total_used_fuel AS f FROM mova.dev_status_30
+                         WHERE unit_id = :u AND local_time >= :d AND can_total_used_fuel > 0 ORDER BY local_time""",
+                      {"u": unit_id, "d": datetime.now() - timedelta(minutes=40)})
+    consumo, minutos = None, None
+    if len(leit) >= 2:
+        dt_h = (leit[-1]["local_time"] - leit[0]["local_time"]).total_seconds() / 3600
+        dl = (float(leit[-1]["f"]) - float(leit[0]["f"])) / 1000
+        if dt_h >= 5 / 60 and 0 <= dl and dl / dt_h <= 150:  # plausível: até 150 L/h
+            consumo, minutos = round(dl / dt_h, 1), round(dt_h * 60)
+    return {"consumo_lh": consumo, "consumo_minutos": minutos}
+
+
+class Marcar(BaseModel):
+    situacao: str  # visto | tratado
+    ate: str       # horário da última ocorrência vista (ISO)
+    unit_id: int
+    nota: Optional[str] = None
+
+
+@router.post("/avisos/{chave:path}/marcar")
+async def marcar(chave: str, p: Marcar, user=Depends(require_permission("reports", "read"))):
+    if p.situacao not in ("visto", "tratado"):
+        raise HTTPException(422, "Situação deve ser visto ou tratado.")
+    rows = await _ler("SELECT group_id FROM mova.tracked_unit WHERE id = :u", {"u": p.unit_id})
+    if not rows:
+        raise HTTPException(404, "Veículo não encontrado.")
+    _grupos_do_usuario(user, rows[0]["group_id"])
+    nome = getattr(user, "email", None) or str(getattr(user, "user_id", ""))
+    agora = datetime.now().isoformat(timespec="seconds")
+    with _trava, _con() as c:
+        c.execute("INSERT OR REPLACE INTO marcacao (chave, unit_id, situacao, ate, por, por_nome, nota, em) VALUES (?,?,?,?,?,?,?,?)",
+                  (chave, p.unit_id, p.situacao, p.ate, getattr(user, "user_id", None), nome, p.nota, agora))
+        c.execute("INSERT INTO historico (chave, unit_id, situacao, ate, nota, por, por_nome, em) VALUES (?,?,?,?,?,?,?,?)",
+                  (chave, p.unit_id, p.situacao, p.ate, p.nota, getattr(user, "user_id", None), nome, agora))
+    return {"ok": True}
+
+
+@router.get("/avisos/historico")
+async def historico(unit_id: Optional[int] = Query(None), user=Depends(require_permission("reports", "read"))):
+    """Quem marcou o quê e quando (para auditoria do CCO)."""
+    with _trava, _con() as c:
+        sql, args = "SELECT * FROM historico", ()
+        if unit_id:
+            sql, args = sql + " WHERE unit_id = ?", (unit_id,)
+        rows = [dict(r) for r in c.execute(sql + " ORDER BY id DESC LIMIT 500", args)]
+    if unit_id:
+        r = await _ler("SELECT group_id FROM mova.tracked_unit WHERE id = :u", {"u": unit_id})
+        if r:
+            _grupos_do_usuario(user, r[0]["group_id"])
+    elif not (getattr(user, "master", 0) or getattr(user, "is_super_admin", False)):
+        raise HTTPException(403, "Informe o veículo.")
+    return {"data": rows}
