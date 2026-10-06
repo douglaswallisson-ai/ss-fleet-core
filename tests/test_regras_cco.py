@@ -24,3 +24,11 @@ def test_icone_por_categoria():
     assert tipo_icone(12) == tipo_icone(22) == "onibus"
     assert tipo_icone(15) == "van"
     assert tipo_icone(3) == tipo_icone(None) == "caminhao"
+
+
+def test_excesso_e_aceleracao_so_criticos_a_partir_de_20():
+    from app.api.v1.endpoints.cco import gravidade_evento
+    assert gravidade_evento(7, 5) == "moderado" and gravidade_evento(7, 20) == "critico"
+    assert gravidade_evento(153, 19) == "moderado" and gravidade_evento(153, 40) == "critico"
+    assert gravidade_evento(9, 1) == "critico"       # freada brusca continua crítica
+    assert gravidade_evento(359, 99) == "moderado"   # curva brusca não escala

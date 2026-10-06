@@ -58,12 +58,22 @@ CACHE_MANUT_S = 300
 
 #: Eventos do equipamento no painel (nome, gravidade). Críticos = timeline.py + pânico e furto (PM, 06/10/2026).
 EVENTOS = {
-    7: ("Excesso de velocidade", "critico"), 9: ("Freada brusca", "critico"), 153: ("Aceleração brusca", "critico"),
+    7: ("Excesso de velocidade", "moderado"), 9: ("Freada brusca", "critico"), 153: ("Aceleração brusca", "moderado"),
     163: ("Faixa vermelha", "critico"), 13: ("Movimento sem tração", "critico"), 27: ("Alimentação desconectada", "critico"),
     37: ("Excesso de velocidade na chuva", "critico"), 48: ("Motorista não autorizado", "critico"), 288: ("Parado acelerando", "critico"),
     11: ("Pânico ativado", "critico"), 440: ("Furto de combustível", "critico"),
     161: ("Faixa amarela", "moderado"), 359: ("Curva brusca", "moderado"), 148: ("Excesso de embreagem", "moderado"),
 }
+#: PM, 06/10/2026: excesso de velocidade e aceleração brusca são moderados (acontecem o tempo
+#: todo) e só viram crítico a partir de 20 ocorrências na janela — "deveria ocorrer 1 ou 2
+#: vezes por dia no máximo". Com eles críticos, 49 de 132 carros da CECOTI ficavam vermelhos.
+ESCALAM_PARA_CRITICO = {7: 20, 153: 20}
+
+
+def gravidade_evento(cod: int, n: int) -> str:
+    base = EVENTOS[cod][1]
+    lim = ESCALAM_PARA_CRITICO.get(cod)
+    return "critico" if base == "critico" or (lim is not None and n >= lim) else base
 
 
 def _so_digitos_nome(s: str) -> str:
@@ -238,7 +248,8 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
                        "reaberto": bool(m), "marcado_antes": m["situacao"] if m else None})
 
     for e in dados["evs"]:
-        nome, grav = EVENTOS[e["cod"]]
+        nome = EVENTOS[e["cod"]][0]
+        grav = gravidade_evento(e["cod"], int(e["n"]))
         add(f"ev:{e['unit_id']}:{e['cod']}", e["unit_id"], nome, "seguranca", grav, e["n"], e["ultimo"],
             f"velocidade máx. {round(e['vel_max'])} km/h" if e["cod"] == 7 and e["vel_max"] else "")
     for e in dados["cams"]:
