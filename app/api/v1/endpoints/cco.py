@@ -320,6 +320,20 @@ async def veiculo(unit_id: int, user=Depends(require_permission("reports", "read
     return {"consumo_lh": consumo, "consumo_minutos": minutos}
 
 
+@router.get("/posicao/{unit_id}")
+async def posicao(unit_id: int, user=Depends(require_permission("reports", "read"))):
+    """Posição atual de um veículo, para "Seguir veículo": consulta leve, uma linha do dev_status."""
+    rows = await _ler("""SELECT tu.group_id, s.local_time, s.latitude::float AS lat, s.longitude::float AS lng, s.direction AS rumo,
+                                s.ignition AS ignicao, s.speed AS velocidade, s.address AS endereco
+                         FROM mova.tracked_unit tu JOIN mova.dev_status s ON s.unit_id = tu.id WHERE tu.id = :u""", {"u": unit_id})
+    if not rows:
+        raise HTTPException(404, "Veículo não encontrado.")
+    r = dict(rows[0])
+    _grupos_do_usuario(user, r.pop("group_id"))
+    r["local_time"] = r["local_time"].isoformat() if r["local_time"] else None
+    return r
+
+
 class Marcar(BaseModel):
     situacao: str  # visto | tratado
     ate: str       # horário da última ocorrência vista (ISO)
