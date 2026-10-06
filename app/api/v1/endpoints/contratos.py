@@ -10,7 +10,13 @@ Regras do PM (06/10/2026):
 - o sistema nunca encerra contrato sozinho. Passar da data de fim só marca
   "vencido" na tela; encerrar é ação manual, com motivo;
 - guardar todos os dados possíveis: vigência, valores, veículos, CNPJ, contatos,
-  produtos, reajuste, faturamento.
+  produtos, reajuste, faturamento;
+- aditivos de veículos (PM, 06/10/2026): "se eu quiser adicionar mais três
+  veículos". Todo contrato tem um número fixo do sistema (`CT-00042`, do id —
+  não muda nem se o número comercial for editado) e todo aditivo carrega o
+  número do pai mais a sequência (`CT-00042-AD01`), gravado na criação. Aditivo
+  não é apagado: é cancelado com motivo. Veículos e parcela do contrato =
+  original + aditivos ativos.
 
 Fontes do pré-preenchimento (só leitura):
 - `mova."group"`: nome, razão social, CNPJ, endereço, contato, pró-rata, código;
@@ -98,6 +104,12 @@ def _con():
         CREATE TABLE IF NOT EXISTS contrato (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER UNIQUE,
             origem TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ativo', dados TEXT NOT NULL,
             motivo_status TEXT, criado_em TEXT, atualizado_em TEXT, autor INTEGER);
+        CREATE TABLE IF NOT EXISTS aditivo (id INTEGER PRIMARY KEY AUTOINCREMENT, contrato_id INTEGER NOT NULL,
+            sequencia INTEGER NOT NULL, numero TEXT NOT NULL UNIQUE, numero_contrato_pai TEXT NOT NULL,
+            tipo TEXT NOT NULL, qtd_veiculos INTEGER NOT NULL, valor_parcela_adicional REAL, valor_implantacao_adicional REAL,
+            data_assinatura TEXT, data_inicio TEXT NOT NULL, data_fim TEXT, placas TEXT, observacoes TEXT,
+            status TEXT NOT NULL DEFAULT 'ativo', motivo_cancelamento TEXT, criado_em TEXT, autor INTEGER,
+            UNIQUE (contrato_id, sequencia));
         CREATE TABLE IF NOT EXISTS historico (id INTEGER PRIMARY KEY AUTOINCREMENT, contrato_id INTEGER,
             acao TEXT, dados TEXT, motivo TEXT, autor INTEGER, em TEXT);
         """
@@ -241,13 +253,46 @@ def _pendencias(d: dict) -> list[str]:
     return [rot for campo, rot in OBRIG_NOVO if d.get(campo) in (None, "", [])]
 
 
-def _saida(row: sqlite3.Row, veiculos_hoje: Optional[int] = None) -> dict:
+def numero_sistema(cid: int) -> str:
+    """Número fixo do contrato: vem do id, nunca muda."""
+    return f"CT-{cid:05d}"
+
+
+def numero_aditivo(cid: int, seq: int) -> str:
+    return f"{numero_sistema(cid)}-AD{seq:02d}"
+
+
+def _aditivos(c: sqlite3.Connection, cid: Optional[int] = None) -> dict[int, list[dict]]:
+    sql = "SELECT * FROM aditivo" + (" WHERE contrato_id = ?" if cid else "") + " ORDER BY contrato_id, sequencia"
+    out: dict[int, list[dict]] = {}
+    for a in c.execute(sql, (cid,) if cid else ()):
+        out.setdefault(a["contrato_id"], []).append(dict(a))
+    return out
+
+
+def totais_com_aditivos(d: dict, aditivos: list[dict]) -> dict:
+    """Contrato original + aditivos ativos (inclusão soma, retirada subtrai)."""
+    ativos = [a for a in aditivos if a["status"] == "ativo"]
+    sinal = lambda a: -1 if a["tipo"] == "retirada" else 1  # noqa: E731
+    veic = (_num(d.get("qtd_veiculos")) or 0) + sum(sinal(a) * a["qtd_veiculos"] for a in ativos)
+    parc = (_num(d.get("valor_parcela")) or 0) + sum(sinal(a) * (a["valor_parcela_adicional"] or 0) for a in ativos)
+    return {"qtd_veiculos_total": int(veic) if d.get("qtd_veiculos") is not None or ativos else None,
+            "valor_parcela_total": round(parc, 2) if d.get("valor_parcela") is not None or any(a["valor_parcela_adicional"] for a in ativos) else None,
+            "aditivos_ativos": len(ativos)}
+
+
+def _saida(row: sqlite3.Row, veiculos_hoje: Optional[int] = None, aditivos: Optional[list[dict]] = None) -> dict:
     d = json.loads(row["dados"])
-    return {"id": row["id"], "group_id": row["group_id"], "origem": row["origem"], "status": row["status"],
-            "motivo_status": row["motivo_status"], "criado_em": row["criado_em"], "atualizado_em": row["atualizado_em"],
-            "dados": d, **_calcular(d), "pendencias": _pendencias(d), "veiculos_hoje": veiculos_hoje,
-            "sem_veiculos": veiculos_hoje == 0,
-            "grupo_a_criar": row["group_id"] is None}
+    ads = aditivos or []
+    tot = totais_com_aditivos(d, ads)
+    calc = _calcular(d)
+    if tot["qtd_veiculos_total"] and tot["valor_parcela_total"]:
+        calc["valor_por_veiculo"] = round(tot["valor_parcela_total"] / tot["qtd_veiculos_total"], 2)
+    return {"id": row["id"], "numero_sistema": numero_sistema(row["id"]), "group_id": row["group_id"], "origem": row["origem"],
+            "status": row["status"], "motivo_status": row["motivo_status"], "criado_em": row["criado_em"],
+            "atualizado_em": row["atualizado_em"], "dados": d, **calc, "pendencias": _pendencias(d),
+            "veiculos_hoje": veiculos_hoje, "sem_veiculos": veiculos_hoje == 0, "grupo_a_criar": row["group_id"] is None,
+            "aditivos": ads, **tot}
 
 
 def _validar_novo(d: dict, outros: list[dict]):
@@ -296,7 +341,8 @@ async def listar(user=Depends(require_permission("reports", "read"))):
             "SELECT group_id, count(*) FROM mova.tracked_unit WHERE status = 1 GROUP BY 1"))).all()}
     with _trava, _con() as c:
         rows = list(c.execute("SELECT * FROM contrato ORDER BY id"))
-    itens = [_saida(r, hoje.get(r["group_id"], 0) if r["group_id"] else None) for r in rows]
+        ads = _aditivos(c)
+    itens = [_saida(r, hoje.get(r["group_id"], 0) if r["group_id"] else None, ads.get(r["id"])) for r in rows]
     itens.sort(key=lambda x: str(x["dados"].get("nome_grupo") or "").lower())
     return {
         "contratos": itens,
@@ -309,7 +355,8 @@ async def listar(user=Depends(require_permission("reports", "read"))):
             "a_completar": sum(1 for i in itens if i["pendencias"]),
             "grupos_a_criar": sum(1 for i in itens if i["grupo_a_criar"]),
             "sem_veiculos": sum(1 for i in itens if i["sem_veiculos"]),
-            "receita_mensal": round(sum(_num(i["dados"].get("valor_parcela")) or 0 for i in itens if i["status"] == "ativo"), 2),
+            "receita_mensal": round(sum(i["valor_parcela_total"] or 0 for i in itens if i["status"] == "ativo"), 2),
+            "aditivos": sum(i["aditivos_ativos"] for i in itens),
         },
         "opcoes": {"segmentos": SEGMENTOS, "produtos": PRODUTOS, "reajustes": REAJUSTES, "pagamentos": PAGAMENTOS},
     }
@@ -322,9 +369,10 @@ async def do_grupo(group_id: int = Query(...), user=Depends(require_permission("
     await _sincronizar()
     with _trava, _con() as c:
         r = c.execute("SELECT * FROM contrato WHERE group_id = ?", (group_id,)).fetchone()
+        ads = _aditivos(c, r["id"]).get(r["id"]) if r else None
     if not r:
         raise HTTPException(404, "Este cliente ainda não tem contrato.")
-    return _saida(r)
+    return _saida(r, aditivos=ads)
 
 
 class Pedido(BaseModel):
@@ -368,7 +416,8 @@ async def editar(cid: int, p: Pedido, user=Depends(require_permission("reports",
         c.execute("INSERT INTO historico (contrato_id, acao, dados, motivo, autor, em) VALUES (?,?,?,?,?,?)",
                   (cid, "editado", json.dumps(_limpar(p.dados), default=str), p.motivo, getattr(user, "user_id", None), _agora()))
         r = c.execute("SELECT * FROM contrato WHERE id = ?", (cid,)).fetchone()
-    return _saida(r)
+        ads = _aditivos(c, cid).get(cid)
+    return _saida(r, aditivos=ads)
 
 
 @router.post("/{cid}/status")
@@ -387,7 +436,8 @@ async def mudar_status(cid: int, p: Pedido, user=Depends(require_permission("rep
         c.execute("INSERT INTO historico (contrato_id, acao, motivo, autor, em) VALUES (?,?,?,?,?)",
                   (cid, f"status:{novo}", p.motivo, getattr(user, "user_id", None), _agora()))
         r = c.execute("SELECT * FROM contrato WHERE id = ?", (cid,)).fetchone()
-    return _saida(r)
+        ads = _aditivos(c, cid).get(cid)
+    return _saida(r, aditivos=ads)
 
 
 @router.get("/{cid}/historico")
@@ -395,3 +445,92 @@ async def historico(cid: int, user=Depends(require_permission("reports", "read")
     _so_ss(user)
     with _trava, _con() as c:
         return {"data": [dict(r) for r in c.execute("SELECT * FROM historico WHERE contrato_id = ? ORDER BY id DESC", (cid,))]}
+
+
+# ------------------------------------------------------------------ aditivos
+
+TIPOS_ADITIVO = {"inclusao": "Inclusão de veículos", "retirada": "Retirada de veículos"}
+
+
+class PedidoAditivo(BaseModel):
+    tipo: str = "inclusao"
+    qtd_veiculos: int
+    valor_parcela_adicional: Optional[float] = None
+    valor_implantacao_adicional: Optional[float] = None
+    data_assinatura: Optional[str] = None
+    data_inicio: str
+    data_fim: Optional[str] = None
+    placas: Optional[str] = None
+    observacoes: Optional[str] = None
+
+
+def validar_aditivo(a: PedidoAditivo, contrato: dict, veiculos_atuais: Optional[int]):
+    if a.tipo not in TIPOS_ADITIVO:
+        raise HTTPException(422, {"message": "Tipo de aditivo inválido.", "field": "tipo"})
+    if a.qtd_veiculos < 1:
+        raise HTTPException(422, {"message": "Informe pelo menos 1 veículo.", "field": "qtd_veiculos"})
+    ini = _data(a.data_inicio)
+    if not ini:
+        raise HTTPException(422, {"message": "Informe a data de início do aditivo.", "field": "data_inicio"})
+    fim = _data(a.data_fim) if a.data_fim else None
+    if a.data_fim and (not fim or fim < ini):
+        raise HTTPException(422, {"message": "O fim do aditivo deve ser depois do início.", "field": "data_fim"})
+    for campo in ("valor_parcela_adicional", "valor_implantacao_adicional"):
+        v = getattr(a, campo)
+        if v is not None and v < 0:
+            raise HTTPException(422, {"message": "O valor não pode ser negativo.", "field": campo})
+    if a.tipo == "retirada" and veiculos_atuais is not None and a.qtd_veiculos > veiculos_atuais:
+        raise HTTPException(422, {"message": f"O contrato tem {veiculos_atuais} veículos; não dá para retirar {a.qtd_veiculos}.",
+                                  "field": "qtd_veiculos"})
+
+
+@router.post("/{cid}/aditivos")
+async def criar_aditivo(cid: int, a: PedidoAditivo, user=Depends(require_permission("reports", "read"))):
+    """Aditivo de veículos. Número = número do contrato pai + sequência (CT-00042-AD01)."""
+    _so_ss(user)
+    with _trava, _con() as c:
+        row = c.execute("SELECT * FROM contrato WHERE id = ?", (cid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Contrato não encontrado.")
+        if row["status"] == "encerrado":
+            raise HTTPException(409, "Contrato encerrado não recebe aditivo. Reative o contrato antes.")
+        atuais = totais_com_aditivos(json.loads(row["dados"]), _aditivos(c, cid).get(cid, []))["qtd_veiculos_total"]
+        validar_aditivo(a, json.loads(row["dados"]), atuais)
+        seq = (c.execute("SELECT max(sequencia) FROM aditivo WHERE contrato_id = ?", (cid,)).fetchone()[0] or 0) + 1
+        numero = numero_aditivo(cid, seq)
+        c.execute("""INSERT INTO aditivo (contrato_id, sequencia, numero, numero_contrato_pai, tipo, qtd_veiculos,
+                     valor_parcela_adicional, valor_implantacao_adicional, data_assinatura, data_inicio, data_fim, placas,
+                     observacoes, criado_em, autor) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (cid, seq, numero, numero_sistema(cid), a.tipo, a.qtd_veiculos, a.valor_parcela_adicional,
+                   a.valor_implantacao_adicional, a.data_assinatura, a.data_inicio, a.data_fim, a.placas, a.observacoes,
+                   _agora(), getattr(user, "user_id", None)))
+        c.execute("INSERT INTO historico (contrato_id, acao, dados, autor, em) VALUES (?,?,?,?,?)",
+                  (cid, f"aditivo:{numero}", a.model_dump_json(), getattr(user, "user_id", None), _agora()))
+        c.execute("UPDATE contrato SET atualizado_em = ? WHERE id = ?", (_agora(), cid))
+        r = c.execute("SELECT * FROM contrato WHERE id = ?", (cid,)).fetchone()
+        ads = _aditivos(c, cid).get(cid)
+    return {"numero": numero, "contrato": _saida(r, aditivos=ads)}
+
+
+class PedidoCancelar(BaseModel):
+    motivo: str
+
+
+@router.post("/{cid}/aditivos/{aid}/cancelar")
+async def cancelar_aditivo(cid: int, aid: int, p: PedidoCancelar, user=Depends(require_permission("reports", "read"))):
+    """Aditivo não é apagado (quebraria a sequência): é cancelado, com motivo, e sai dos totais."""
+    _so_ss(user)
+    if not p.motivo.strip():
+        raise HTTPException(422, {"message": "Informe o motivo do cancelamento.", "field": "motivo"})
+    with _trava, _con() as c:
+        a = c.execute("SELECT * FROM aditivo WHERE id = ? AND contrato_id = ?", (aid, cid)).fetchone()
+        if not a:
+            raise HTTPException(404, "Aditivo não encontrado neste contrato.")
+        if a["status"] == "cancelado":
+            raise HTTPException(409, "Este aditivo já está cancelado.")
+        c.execute("UPDATE aditivo SET status = 'cancelado', motivo_cancelamento = ? WHERE id = ?", (p.motivo.strip(), aid))
+        c.execute("INSERT INTO historico (contrato_id, acao, motivo, autor, em) VALUES (?,?,?,?,?)",
+                  (cid, f"aditivo_cancelado:{a['numero']}", p.motivo.strip(), getattr(user, "user_id", None), _agora()))
+        r = c.execute("SELECT * FROM contrato WHERE id = ?", (cid,)).fetchone()
+        ads = _aditivos(c, cid).get(cid)
+    return _saida(r, aditivos=ads)

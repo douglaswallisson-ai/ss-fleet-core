@@ -57,3 +57,46 @@ def test_existente_sem_dados_nao_quebra():
 def test_limpar_formata_cnpj_e_ignora_campo_desconhecido():
     d = _limpar({"cnpj": "11222333000181", "hackear": 1})
     assert d == {"cnpj": "11.222.333/0001-81"}
+
+
+# ------------------------------------------------------------------ aditivos
+
+from app.api.v1.endpoints.contratos import PedidoAditivo, numero_aditivo, numero_sistema, totais_com_aditivos, validar_aditivo
+
+
+def ad(**kw):
+    base = {"contrato_id": 1, "tipo": "inclusao", "qtd_veiculos": 3, "valor_parcela_adicional": 390.0, "status": "ativo"}
+    base.update(kw)
+    return base
+
+
+def test_numero_do_aditivo_amarra_no_pai():
+    assert numero_sistema(42) == "CT-00042"
+    assert numero_aditivo(42, 1) == "CT-00042-AD01"
+    assert numero_aditivo(42, 12) == "CT-00042-AD12"
+
+
+def test_mais_tres_veiculos_soma_no_contrato():
+    t = totais_com_aditivos({"qtd_veiculos": 10, "valor_parcela": 1300}, [ad()])
+    assert t["qtd_veiculos_total"] == 13 and t["valor_parcela_total"] == 1690 and t["aditivos_ativos"] == 1
+
+
+def test_aditivo_cancelado_sai_do_total_e_retirada_subtrai():
+    t = totais_com_aditivos({"qtd_veiculos": 10, "valor_parcela": 1300},
+                            [ad(status="cancelado"), ad(tipo="retirada", qtd_veiculos=2, valor_parcela_adicional=260)])
+    assert t["qtd_veiculos_total"] == 8 and t["valor_parcela_total"] == 1040
+
+
+def test_aditivo_em_contrato_existente_sem_dados():
+    """Cliente antigo sem quantidade no contrato: o aditivo conta sozinho."""
+    assert totais_com_aditivos({}, [ad()])["qtd_veiculos_total"] == 3
+
+
+@pytest.mark.parametrize("kw,campo", [({"qtd_veiculos": 0}, "qtd_veiculos"), ({"data_inicio": ""}, "data_inicio"),
+                                      ({"data_fim": "2020-01-01"}, "data_fim"), ({"valor_parcela_adicional": -1}, "valor_parcela_adicional"),
+                                      ({"tipo": "retirada", "qtd_veiculos": 20}, "qtd_veiculos")])
+def test_aditivo_recusa(kw, campo):
+    a = PedidoAditivo(**{"qtd_veiculos": 3, "data_inicio": "2026-10-10", **kw})
+    with pytest.raises(HTTPException) as e:
+        validar_aditivo(a, {}, 10)
+    assert e.value.detail["field"] == campo

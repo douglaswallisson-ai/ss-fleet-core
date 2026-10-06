@@ -13,6 +13,13 @@ Regras do PM (06/10/2026):
   conferidos), segmento, início, fim ≥ início, veículos ≥ 1, parcela > 0,
   contato e e-mail.
 
+Aditivos de veículos (`POST /contratos/{id}/aditivos`, PM 06/10/2026):
+- todo contrato tem número fixo do sistema `CT-00042` (do id; não muda);
+- aditivo = `CT-00042-AD01`, `AD02`…, gravado na criação junto com o número do pai;
+- inclusão soma e retirada subtrai veículos e parcela; retirada não pode passar da frota;
+- não se apaga aditivo: cancela com motivo (sai dos totais, o número não é reaproveitado);
+- contrato encerrado não recebe aditivo.
+
 Pré-preenchimento: `mova."group"` + `cliente_financeiro_vigencia` **sem as linhas
 `registrado_por = 'teste'`** (170 de 199 eram fictícias em 06/10/2026) + veículos
 ativos. O sincronismo (a cada 5 min, na listagem) só cria o que falta; nunca
