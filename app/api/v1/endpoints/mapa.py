@@ -9,6 +9,10 @@ Vault (Telas/Cerca): cerca tipo 1 = circular (centro + raio em metros);
 A busca usa as duas ordens e a resposta entrega `pontos` já como
 [latitude, longitude], conferindo cada geometria. Só leitura; sempre dentro do escopo do usuário
 e da área visível do mapa (índices geográficos das duas tabelas).
+
+Com uma empresa escolhida, a tela pede as cercas em qualquer zoom (a CECOTI
+tem ~680 cercas espalhadas por MG/GO/SP e o mapa abre no zoom 5): por isso
+`tolerancia` — o mapa afastado pede o desenho simplificado.
 """
 
 import json
@@ -66,12 +70,13 @@ async def camadas(
     group_id: Optional[int] = Query(None),
     pois: bool = Query(True),
     cercas: bool = Query(True),
+    tolerancia: float = Query(0.00003, ge=0.00001, le=0.01, description="Simplificação do desenho em graus; o mapa afastado pede mais."),
     db: AsyncSession = Depends(get_db_read),
     current_user=Depends(require_permission("reports", "read")),
 ):
     grupos = _grupos(current_user, group_id)
     filtro = "" if grupos is None else " AND group_id = ANY(CAST(:g AS integer[]))"
-    p = {"a": min_lon, "b": min_lat, "c": max_lon, "d": max_lat, "g": grupos or [], "lim": LIMITE + 1}
+    p = {"a": min_lon, "b": min_lat, "c": max_lon, "d": max_lat, "g": grupos or [], "lim": LIMITE + 1, "tol": tolerancia}
     saida: dict = {"pois": [], "cercas": [], "truncado": False}
     if pois:
         rows = (
@@ -101,7 +106,7 @@ async def camadas(
                     SELECT id, name, polygroup_type AS tipo, color, radius, speed, description,
                            latitude::float AS lat, longitude::float AS lon,
                            CASE WHEN polygroup_type <> 1 AND polygon IS NOT NULL
-                                THEN ST_AsGeoJSON(ST_SimplifyPreserveTopology(polygon, 0.00003), 6) END AS geo
+                                THEN ST_AsGeoJSON(ST_SimplifyPreserveTopology(polygon, :tol), 6) END AS geo
                     FROM mova.cerca
                     WHERE status = 1 {filtro}
                       AND (
