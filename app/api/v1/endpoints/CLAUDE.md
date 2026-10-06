@@ -17,6 +17,8 @@ Padrão de código: ver `../../../../CLAUDE.md` (raiz do projeto), seção 2.
 | `timeline.py` | `/eventos/timeline` | linha do tempo de eventos por veículo/motorista | não | `_docs/tracking-e-timeline.md` |
 | `events.py` | `/events` | alarmes e ocorrências com reconhecimento | `acknowledge` grava em produção — **não usar** | `_docs/eventos-e-video.md` |
 | `video.py` | `/video` | câmeras e ocorrências DMS/ADAS | não | `_docs/eventos-e-video.md` |
+| `cco.py` | `/cco` | Painel CCO: veículos (ícone por categoria), avisos de segurança/câmera/Monitor/manutenção agrupados, Visto/Tratado | provisório `data/cco.sqlite` (marcações) | docstring do módulo |
+| `manutencao_risco.py` | `/manutencao-risco` | nota de risco com motivos, tendência (bateria, temperatura, consumo), causa raiz | não | docstring do módulo |
 | `estoque.py` | `/estoque` | estoque de equipamentos: serial × placa (ao vivo) × contrato/aditivo; expedição, manutenção, devolução | provisório `data/estoque.sqlite` (base `data/estoque_base.json`) | `_docs/estoque.md` |
 | `contratos.py` | `/contratos` | contrato de todo cliente; grupo novo só por contrato; clientes existentes pré-preenchidos e sem trava; nunca encerra sozinho | provisório `data/contratos.sqlite` | `_docs/contratos.md` |
 | `cameras.py` | `/cameras` | vídeo ao vivo (JIMI JC450 em FLV, Hikvision G40 em HLS) via proxies, chaves no `.env` | não grava; abrir canal pede transmissão ao equipamento | `_docs/eventos-e-video.md` |

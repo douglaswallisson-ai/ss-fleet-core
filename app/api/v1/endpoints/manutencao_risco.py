@@ -41,6 +41,10 @@ CACHE_S = 1800
 DIAS_TENDENCIA = 14
 MIN_DIAS = 7
 
+#: Acima disto (eventos de condução por km) a contagem é do equipamento, não do motorista.
+#: CECOTI, 06/10/2026: TDV-7E89 com 5/km (aceleração) e PZO-7A16 com 0,68/km (embreagem).
+EVENTOS_POR_KM_SUSPEITO = 0.5
+
 PESO = {"critico": 30, "atencao": 12, "vencido": 15, "vencendo": 5, "tendencia": 15, "conducao_max": 25}
 
 
@@ -200,8 +204,8 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
         km = float(c["km"] or 0)
         if km >= 300:  # pouco km distorce a taxa
             taxas[c["unit_id"]] = (100 * float(c["eventos"] or 0) / km, c, km)
-    # Mais de 1 evento por km é equipamento, não condução (TDV-7E89: 5 por km): fica fora do ranking.
-    ordenadas = sorted(t for t, _, _ in taxas.values() if t < 100)
+    # Contagem acima de EVENTOS_POR_KM_SUSPEITO é equipamento, não condução: fica fora do ranking.
+    ordenadas = sorted(t for t, _, _ in taxas.values() if t < 100 * EVENTOS_POR_KM_SUSPEITO)
 
     def percentil(x):
         return sum(1 for t in ordenadas if t <= x) / len(ordenadas) if ordenadas else None
@@ -210,7 +214,7 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
     for v in base["veiculos"]:
         tend = tendencias(por_unidade.get(v["unit_id"], []))
         tx = taxas.get(v["unit_id"])
-        suspeita = tx[0] / 100 if tx and tx[0] >= 100 else None
+        suspeita = tx[0] / 100 if tx and tx[0] >= 100 * EVENTOS_POR_KM_SUSPEITO else None
         pct = percentil(tx[0]) if tx and not suspeita else None
         pontos, motivos = nota(v, tend, pct, suspeita)
         veiculos.append({
@@ -283,6 +287,8 @@ async def causa_raiz(unit_id: int, ate: Optional[date] = Query(None), dias: int 
         litros = float(r["litros"]) if r.get("litros") else None
         linha.append({
             "dia": d.isoformat(),
+            # O consolidado diário (con_driver_h_km) sai com ~1 dia de atraso.
+            "em_andamento": d >= date.today(),
             "km": round(km, 1) if km is not None and 0 <= km <= 2000 else None,
             "horas": round(float(r["horas"]), 1) if r.get("horas") else None,
             # Dia quase parado não tem km/l que signifique algo (0,1 km com 0,5 L = 0,2 km/l).
@@ -317,7 +323,7 @@ async def causa_raiz(unit_id: int, ate: Optional[date] = Query(None), dias: int 
             continue
         # Mais de um evento por km não é condução: é configuração ou sensor do equipamento
         # (TDV-7E89, CECOTI: 2.393 acelerações bruscas em 488 km num dia, 06/10/2026).
-        if km_total >= 50 and n / km_total >= 1:
+        if km_total >= 50 and n / km_total >= EVENTOS_POR_KM_SUSPEITO:
             pontos.append(f"{nome}: {n} ocorrências em {round(km_total)} km ({n / km_total:.1f} por km) — contagem suspeita do equipamento; "
                           "conferir a configuração antes de cobrar o motorista.")
         else:
