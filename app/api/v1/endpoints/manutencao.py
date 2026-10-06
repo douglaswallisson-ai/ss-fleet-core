@@ -8,10 +8,9 @@ Decisões de produto (PM, 02/10/2026):
   ORDEM DE SERVIÇO, acompanhada até fechar. Também dá para abrir OS à mão.
 
 Fontes (só leitura no banco):
-- Odômetro atual: `mova.dev_status.odom` (metros), respeitando a marcação de
-  qualidade (vault: dev_status-estado-atual-e-qualidade-do-odometro): 0 e
-  100.000.000 são inválidos; se inválido, usa `can_total_odometer` (metros).
-  Nunca `tracked_unit.initial_odometer` (valor da instalação).
+- Odômetro e horímetro atuais: regra única em `app/core/odometro.py` (a mesma de
+  Veículos, do mapa e do plataforma_web). Nunca `tracked_unit.initial_odometer`
+  (valor da instalação).
 - Sinais do motor: colunas `can_*`, `voltage` do `dev_status` (última leitura),
   julgados pelas leituras das últimas 24 h (`dev_status_30`): uma leitura só
   não abre alerta, e sensor que manda valor impossível vira "sinal suspeito"
@@ -50,6 +49,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocalReplica
+from app.core.odometro import horimetro_h, odometro_km
 from app.middleware.auth import require_permission
 
 router = APIRouter()
@@ -57,7 +57,6 @@ router = APIRouter()
 ARQUIVO = Path(__file__).resolve().parents[4] / "data" / "manutencao.sqlite"
 _trava = threading.Lock()
 
-ODOM_INVALIDOS = {0, 100_000_000}
 #: Antecedência para "vence em breve".
 AVISO_KM = 1_000
 AVISO_DIAS = 15
@@ -157,7 +156,7 @@ async def _frota(group_id: int) -> list[dict]:
         """
         SELECT tu.id AS unit_id, tu.label AS placa, tu.label2 AS prefixo, tu.model AS modelo, tu.vehicle_year AS ano,
                tu.unit_category_id AS categoria_id, uc.name AS categoria,
-               ds.local_time, ds.odom, ds.can_total_odometer, ds.odom_quality_flag,
+               ds.local_time, ds.odom, ds.odom_total, ds.can_total_odometer, ds.odom_quality_flag,
                ds.can_engine_coolant_temp AS temp, ds.can_engine_oil_pressure AS oleo, ds.voltage,
                ds.can_def_level_percent AS arla, ds.can_fuel_level_percent AS combustivel,
                ds.can_pneumatic_system1_pressure AS ar_freio, COALESCE(ds.can_rpm, ds.rpm) AS rpm, ds.ignition,
@@ -172,18 +171,12 @@ async def _frota(group_id: int) -> list[dict]:
     out = []
     for r in rows:
         d = dict(r)
-        odom, alt = d.pop("odom"), d.pop("can_total_odometer")
-        km = None
+        km = odometro_km(d.pop("odom_total"), d.pop("odom"), d.pop("can_total_odometer"))
         qualidade = d.pop("odom_quality_flag")
-        if odom is not None and int(odom) not in ODOM_INVALIDOS:
-            km = float(odom) / 1000
-        elif alt is not None and float(alt) > 0:
-            km = float(alt) / 1000
         d["odometro_km"] = round(km) if km is not None else None
         d["odometro_travado"] = qualidade == "frozen_business_rule"
-        h_can, h_eq = d.pop("can_engine_hourmeter"), d.pop("hourmeter")
-        minutos = next((float(x) for x in (h_can, h_eq) if x is not None and float(x) > 0), None)
-        d["horimetro_h"] = round(minutos / 60) if minutos else None
+        h = horimetro_h(d.pop("can_engine_hourmeter"), d.pop("hourmeter"))
+        d["horimetro_h"] = round(h) if h else None
         for k in ("temp", "oleo", "voltage", "arla", "combustivel", "ar_freio", "rpm"):
             d[k] = float(d[k]) if d[k] is not None and float(d[k]) != 0 else None
         out.append(d)

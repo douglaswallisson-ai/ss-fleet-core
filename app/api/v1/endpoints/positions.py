@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_read
+from app.core.odometro import odometro_sql
 from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.middleware.auth import require_permission
 from app.models.user import User
@@ -85,7 +86,7 @@ async def list_positions(
                     ds.ignition,
                     ds.address,
                     ds.local_time,
-                    ds.odom,
+                    {odometro_sql('ds')} AS odom,
                     tu.group_id,
                     tu.subgroup_id,
                     tu.unit_category_id AS categoria_id,

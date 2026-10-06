@@ -4,10 +4,12 @@ Análise de Condução, Central de Segurança, Gestão do Parado Ligado, Não
 Identificado). Só leitura.
 
 Fontes, as mesmas do Power BI (vault: Power-BI-Modelo-de-Dados):
-- `mova.heatmap` (f_heatmap): eventos com hora e local. Tem ~269 milhões de
-  linhas e só o índice (unit_id, tracker_event_id, local_time) — toda consulta
-  filtra pelos três, com a lista de veículos resolvida antes. Carga com atraso
-  de cerca de um dia: a rota devolve até quando há dado.
+- Eventos de condução: `mova.dev_status_30`, o histórico bruto de posições — a
+  mesma fonte do Painel CCO e da causa raiz, e que bate com as contagens de
+  `con_driver_h_km` (ranking). Particionado por dia, índice (unit_id,
+  local_time, tracker_event_id); a lista de veículos é resolvida antes.
+  O `mova.heatmap` do Power BI foi abandonado aqui: chega com dias de atraso e
+  incompleto (CECOTI, 28/09–04/10/2026: 19 acelerações bruscas contra 7.230).
 - `mova.con_stop_engine_on` (f_Stop): cada parada com motor ligado.
 - `mova.con_driver_h_km` (f_historico): horas por dia, veículo e condutor.
 """
@@ -88,20 +90,21 @@ async def eventos(
         return vazio
     extra, pextra = _filtro_heatmap(f)
     base = (
-        "FROM mova.heatmap h WHERE h.unit_id = ANY(CAST(:ids AS bigint[]))"
+        "FROM mova.dev_status_30 h JOIN mova.tracked_unit tu ON tu.id = h.unit_id"
+        " WHERE h.unit_id = ANY(CAST(:ids AS bigint[]))"
         " AND h.tracker_event_id = ANY(CAST(:cods AS bigint[]))"
         " AND h.local_time >= :ini AND h.local_time < :fim" + extra
     )
     p = {"ids": ids, "cods": TODOS_CODIGOS, "ini": datetime.combine(ini, datetime.min.time()),
          "fim": datetime.combine(fim + timedelta(days=1), datetime.min.time()), **pextra}
 
-    # As três leituras no heatmap rodam ao mesmo tempo, cada uma na sua
+    # As três leituras rodam ao mesmo tempo, cada uma na sua
     # conexão: em sequência, com muitos veículos, passavam de um minuto.
     por_entidade, matriz, por_dia = await asyncio.gather(
         _ler(
             f"""
                 SELECT h.unit_id, COALESCE(h.driver_id, 0) AS driver_id,
-                       MAX(CONCAT_WS(' · ', NULLIF(TRIM(h.label), ''), NULLIF(NULLIF(TRIM(h.label2), ''), 'NULL'))) AS placa,
+                       MAX(CONCAT_WS(' · ', NULLIF(TRIM(tu.label), ''), NULLIF(NULLIF(TRIM(tu.label2), ''), 'NULL'))) AS placa,
                        MAX(NULLIF(NULLIF(TRIM(h.driver_name), ''), 'NULL')) AS condutor,
                        {CASE_TIPO} AS tipo, COUNT(*) AS n, MAX(h.local_time) AS ultimo
                 {base}
@@ -169,41 +172,15 @@ async def eventos_lista(
 ):
     """Eventos de condução de um dia, um por linha, mais recentes primeiro.
 
-    Fonte: `mova.heatmap`. Ele chega com dias de atraso (em 02/10/2026 estava
-    em 25/09); para dia ainda não carregado, os eventos vêm do histórico de
-    posições (`dev_status_30`), que é tempo real — os mesmos códigos de evento.
+    Fonte: `dev_status_30` (tempo real), a mesma dos totais de `/eventos`.
     """
     ids = await _veiculos(db, current_user, f)
     if not ids:
-        return {"dia": dia.isoformat(), "itens": [], "ultimo_carregado": None, "fonte": "heatmap"}
+        return {"dia": dia.isoformat(), "itens": [], "ultimo_carregado": None, "fonte": "tempo_real"}
     ini = datetime.combine(dia, datetime.min.time())
     fim = datetime.combine(dia + timedelta(days=1), datetime.min.time())
-    # Até quando a tabela foi carregada para esses veículos.
-    ultimo = (
-        await db.execute(
-            text(
-                "SELECT MAX(h.local_time) FROM mova.heatmap h WHERE h.unit_id = ANY(CAST(:ids AS bigint[]))"
-                " AND h.tracker_event_id = ANY(CAST(:cods AS bigint[])) AND h.local_time >= :desde"
-            ),
-            {"ids": ids, "cods": TODOS_CODIGOS, "desde": datetime.combine(dia - timedelta(days=14), datetime.min.time())},
-        )
-    ).scalar()
-    tempo_real = ultimo is None or ultimo < fim - timedelta(minutes=5)
     extra, pextra = _filtro_heatmap(f)
-    if not tempo_real:
-        sql = f"""
-            SELECT h.id, h.local_time, h.unit_id, h.label, h.label2, COALESCE(h.driver_id, 0) AS driver_id,
-                   NULLIF(NULLIF(TRIM(h.driver_name), ''), 'NULL') AS condutor, h.tracker_event_name AS evento,
-                   {CASE_TIPO} AS tipo, NULLIF(NULLIF(TRIM(h.address), ''), 'NULL') AS endereco, h.area_name AS cerca,
-                   h.latitude, h.longitude, NULL::numeric AS velocidade
-            FROM mova.heatmap h
-            WHERE h.unit_id = ANY(CAST(:ids AS bigint[]))
-              AND h.tracker_event_id = ANY(CAST(:cods AS bigint[]))
-              AND h.local_time >= :ini AND h.local_time < :fim {extra}
-            ORDER BY h.local_time DESC
-            LIMIT :limit"""
-    else:
-        sql = f"""
+    sql = f"""
             SELECT md5(h.unit_id::text || h.local_time::text || h.tracker_event_id::text) AS id, h.local_time, h.unit_id,
                    tu.label, tu.label2, COALESCE(h.driver_id, 0) AS driver_id,
                    NULLIF(NULLIF(TRIM(h.driver_name), ''), 'NULL') AS condutor, te.name AS evento,
@@ -222,8 +199,8 @@ async def eventos_lista(
     ).mappings().all()
     return {
         "dia": dia.isoformat(),
-        "ultimo_carregado": ultimo.isoformat() if ultimo else None,
-        "fonte": "tempo_real" if tempo_real else "heatmap",
+        "ultimo_carregado": None,
+        "fonte": "tempo_real",
         "itens": [
             {
                 "id": r["id"],

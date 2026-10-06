@@ -118,7 +118,7 @@ async def paradas_deslocamentos(group_id: int = Query(...), inicio: date = Query
     salto = "(c.move_stop <> 0 AND c.total_time > 0 AND c.total_km / 1000.0 / (c.total_time / 3600.0) > :salto)"
     linhas = await _ler(f"""SELECT c.id, c.unit_id, tu.label AS placa, tu.label2 AS prefixo,
             CASE WHEN c.move_stop = 0 THEN 'parada' ELSE 'deslocamento' END AS tipo,
-            c.initial_time AS inicio, c.final_time AS fim, c.total_time AS duracao_s, c.time_ign_on AS ligado_s,
+            c.initial_time AS inicio, c.final_time AS fim, c.total_time AS duracao_s, NULLIF(c.time_ign_on, 0) AS ligado_s,
             round(coalesce(c.total_km, 0) / 1000.0, 2) AS km, c.avg_spd AS vel_media, c.max_spd AS vel_max,
             c.initial_address AS endereco_inicio, c.final_address AS endereco_fim,
             coalesce(c.initial_poi_name, c.initial_area_name) AS local_inicio, coalesce(c.final_poi_name, c.final_area_name) AS local_fim,
@@ -127,7 +127,6 @@ async def paradas_deslocamentos(group_id: int = Query(...), inicio: date = Query
     consolidado = await _ler(f"""SELECT c.unit_id, max(tu.label) AS placa, max(tu.label2) AS prefixo,
             count(*) FILTER (WHERE c.move_stop = 0) AS paradas,
             coalesce(sum(c.total_time) FILTER (WHERE c.move_stop = 0), 0) AS parado_s,
-            coalesce(sum(c.time_ign_on) FILTER (WHERE c.move_stop = 0), 0) AS parado_ligado_s,
             count(*) FILTER (WHERE c.move_stop <> 0) AS deslocamentos,
             coalesce(sum(c.total_time) FILTER (WHERE c.move_stop <> 0 AND NOT {salto}), 0) AS movimento_s,
             round(coalesce(sum(c.total_km) FILTER (WHERE c.move_stop <> 0 AND NOT {salto}), 0) / 1000.0, 1) AS km,
@@ -135,6 +134,16 @@ async def paradas_deslocamentos(group_id: int = Query(...), inicio: date = Query
             count(*) FILTER (WHERE {salto}) AS saltos,
             round(coalesce(sum(c.total_km) FILTER (WHERE {salto}), 0) / 1000.0, 1) AS km_descartado
         {base} GROUP BY c.unit_id ORDER BY max(tu.label)""", p)
+    # Parado ligado: `con_stop.time_ign_on` vem zerado em todas as linhas (1,5 milhão em 7 dias, out/2026).
+    # O total por veículo sai da mesma fonte do Gerencial, do ranking e de Veículos
+    # (con_telemetry_day, ocioso + produtivo), no período inteiro, sem o filtro de duração mínima.
+    pl = {r["unit_id"]: r["s"] for r in await _ler("""SELECT td.unit_id, SUM(COALESCE(td.time_stop_engine_on, 0)
+                + COALESCE(td.time_stop_engine_on_productive, 0)) AS s
+            FROM mova.con_telemetry_day td JOIN mova.tracked_unit tu ON tu.id = td.unit_id
+            WHERE tu.group_id = :g AND td.day >= :d0 AND td.day < :d1
+              AND (CAST(:u AS int) IS NULL OR td.unit_id = :u)
+            GROUP BY 1""", {"g": p["g"], "u": p["u"], "d0": p["ini"].date(), "d1": p["fim"].date()})}
+    consolidado = [{**c, "parado_ligado_s": pl.get(c["unit_id"])} for c in consolidado]
     r = {"linhas": linhas[:LINHAS_MAX], "cortado": len(linhas) > LINHAS_MAX, "consolidado": consolidado}
     _CACHE[k] = (time.time(), r)
     return r
@@ -155,7 +164,7 @@ async def paradas_poi(group_id: int = Query(...), inicio: date = Query(...), fim
         WHERE c.group_id = :g AND c.move_stop = 0 AND c.initial_time >= :ini AND c.initial_time < :fim
           AND (CAST(:u AS int) IS NULL OR c.unit_id = :u) AND coalesce(c.total_time, 0) >= :min_s"""
     linhas = await _ler(f"""SELECT c.id, tu.label AS placa, tu.label2 AS prefixo, c.driver_name AS motorista, po.id AS poi_id, po.name AS ponto,
-            c.initial_time AS inicio, c.final_time AS fim, c.total_time AS duracao_s, c.time_ign_on AS ligado_s,
+            c.initial_time AS inicio, c.final_time AS fim, c.total_time AS duracao_s, NULLIF(c.time_ign_on, 0) AS ligado_s,
             c.final_poi_distance AS distancia_m, c.initial_address AS endereco
         {base} ORDER BY c.initial_time DESC LIMIT {LINHAS_MAX + 1}""", p)
     por_ponto = await _ler(f"""SELECT po.id AS poi_id, po.name AS ponto, count(*) AS paradas, count(DISTINCT c.unit_id) AS veiculos,
