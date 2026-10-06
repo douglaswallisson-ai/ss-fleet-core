@@ -181,3 +181,42 @@ def test_vencido_por_horas_de_motor():
 def test_em_dia():
     r = _situacao_item(item(km=20_000, dias=180), ultimo(dias_atras=10, km=100_000), 105_000)
     assert r["situacao"] == "em_dia"
+
+
+# ------------------------------------------------------------- manutenção por risco
+
+from datetime import date as _d, timedelta as _td
+
+from app.api.v1.endpoints.manutencao_risco import inclinacao, nota, tendencias
+
+
+def serie(campo, valores):
+    return [{"dia": _d(2026, 9, 22) + _td(days=i), campo: v} for i, v in enumerate(valores)]
+
+
+def test_inclinacao():
+    assert round(inclinacao([(0, 1), (1, 2), (2, 3)]), 3) == 1.0
+
+
+def test_um_dia_atipico_nao_vira_tendencia_de_bateria():
+    """PZO-7A16: 13,4 V no primeiro dia (carga de superfície) e o resto estável."""
+    v = [13.4, 12.5, 12.6, 12.5, 12.5, 12.4, 12.5, 12.5, 12.4, 12.5]
+    assert tendencias(serie("v_repouso", v)) == []
+
+
+def test_bateria_24v_caindo_de_verdade():
+    v = [25.6, 25.5, 25.5, 25.4, 25.2, 25.0, 24.9, 24.8, 24.7, 24.6]
+    t = tendencias(serie("v_repouso", v))
+    assert [x["chave"] for x in t] == ["bateria"]
+
+
+def test_consumo_de_veiculo_leve_com_pouco_km_nao_alerta():
+    dias = [{"dia": _d(2026, 9, 22) + _td(days=i), "km_l": k, "km_comb": 80, "litros": 80 / k}
+            for i, k in enumerate([5.5, 5.4, 5.6, 5.5, 4.6, 4.5, 4.6, 4.5])]
+    assert tendencias(dias) == []          # 320 km por metade: abaixo de 800
+
+
+def test_nota_soma_os_motivos_e_limita_em_100():
+    v = {"alertas": [{"nivel": "critico", "titulo": "Motor quente", "valor": "108 °C"}] * 4, "vencidos": 2, "vencendo": 0}
+    pontos, motivos = nota(v, [], 1.0)
+    assert pontos == 100 and motivos[0]["pontos"] == 30
