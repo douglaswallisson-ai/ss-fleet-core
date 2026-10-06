@@ -28,7 +28,8 @@ def test_icone_por_categoria():
 
 def test_excesso_e_aceleracao_so_criticos_a_partir_de_20():
     from app.api.v1.endpoints.cco import gravidade_evento
-    assert gravidade_evento(7, 5) == "moderado" and gravidade_evento(7, 20) == "critico"
-    assert gravidade_evento(153, 19) == "moderado" and gravidade_evento(153, 40) == "critico"
-    assert gravidade_evento(9, 1) == "critico"       # freada brusca continua crítica
+    assert gravidade_evento(7, 49) == "moderado" and gravidade_evento(7, 50) == "critico"
+    assert gravidade_evento(153, 20) == "moderado" and gravidade_evento(153, 80) == "critico"
+    assert gravidade_evento(9, 10) == "moderado" and gravidade_evento(440, 50) == "critico"
+    assert gravidade_evento(11, 1) == "critico"      # pânico continua crítico na primeira
     assert gravidade_evento(359, 99) == "moderado"   # curva brusca não escala
