@@ -19,3 +19,8 @@ data/combustivel.sqlite
 data/cadastros.sqlite
 data/cliente.sqlite
 data/pracas_pedagio.csv
+# Armazenamentos provisórios novos (dados de clientes: nunca versionar)
+data/contratos.sqlite
+data/estoque.sqlite
+data/estoque_base.json
+data/cco.sqlite

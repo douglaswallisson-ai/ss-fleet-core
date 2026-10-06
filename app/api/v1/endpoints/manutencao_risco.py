@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from app.api.v1.endpoints import manutencao as man
+from app.core import camera as cam
 from app.core import combustivel as plaus
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
@@ -123,9 +124,13 @@ def tendencias(dias: list[dict]) -> list[dict]:
     return out
 
 
-def nota(v: dict, tend: list[dict], pct_conducao: Optional[float]) -> tuple[int, list[dict]]:
-    """(nota 0–100, motivos com os pontos)."""
+def nota(v: dict, tend: list[dict], pct_conducao: Optional[float], conducao_suspeita: Optional[float] = None) -> tuple[int, list[dict]]:
+    """(nota 0–100, motivos com os pontos). `conducao_suspeita` = eventos por km quando passam de 1."""
     motivos = []
+    if conducao_suspeita:
+        motivos.append({"pontos": 0, "texto": f"Contagem de eventos suspeita ({conducao_suspeita:.1f} por km): conferir a configuração do equipamento",
+                        "tipo": "conducao"})
+        pct_conducao = None
     for a in v.get("alertas", []):
         pts = PESO["critico"] if a["nivel"] == "critico" else PESO["atencao"]
         motivos.append({"pontos": pts, "texto": f"{a['titulo']} ({a.get('valor') or 'agora'})", "tipo": "alerta"})
@@ -195,7 +200,8 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
         km = float(c["km"] or 0)
         if km >= 300:  # pouco km distorce a taxa
             taxas[c["unit_id"]] = (100 * float(c["eventos"] or 0) / km, c, km)
-    ordenadas = sorted(t for t, _, _ in taxas.values())
+    # Mais de 1 evento por km é equipamento, não condução (TDV-7E89: 5 por km): fica fora do ranking.
+    ordenadas = sorted(t for t, _, _ in taxas.values() if t < 100)
 
     def percentil(x):
         return sum(1 for t in ordenadas if t <= x) / len(ordenadas) if ordenadas else None
@@ -204,8 +210,9 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
     for v in base["veiculos"]:
         tend = tendencias(por_unidade.get(v["unit_id"], []))
         tx = taxas.get(v["unit_id"])
-        pct = percentil(tx[0]) if tx else None
-        pontos, motivos = nota(v, tend, pct)
+        suspeita = tx[0] / 100 if tx and tx[0] >= 100 else None
+        pct = percentil(tx[0]) if tx and not suspeita else None
+        pontos, motivos = nota(v, tend, pct, suspeita)
         veiculos.append({
             "unit_id": v["unit_id"], "placa": v["placa"], "prefixo": v["prefixo"], "modelo": v["modelo"],
             "categoria_id": v["categoria_id"], "categoria": v["categoria"],
@@ -248,9 +255,10 @@ async def causa_raiz(unit_id: int, ate: Optional[date] = Query(None), dias: int 
         WHERE d.unit_id = :u AND d.local_time >= :ini AND d.local_time < :fim
           AND d.tracker_event_id IN (7, 9, 11, 13, 27, 37, 148, 153, 159, 163, 288, 359, 405, 407, 440)
         GROUP BY 1, 2""", p)
-    camera = await _ler("""
-        SELECT h.local_time::date AS dia, coalesce(t.name, 'Evento de câmera') AS evento, count(*) AS n
-        FROM vcms.vcms_history h LEFT JOIN vcms.vcms_alarm_type t ON t.id = h.alarm_type
+    # Nome do tipo pela chave (type, modelo, source): pelo id sozinho ADAS vira DMS (app/core/camera.py).
+    camera = await _ler(f"""
+        SELECT h.local_time::date AS dia, {cam.NOME_SQL} AS evento, count(*) AS n
+        FROM vcms.vcms_history h {cam.JOIN_TIPO}
         WHERE h.unit_id = :u AND h.local_time >= :ini AND h.local_time < :fim GROUP BY 1, 2""", p)
     alarmes = await _ler("""
         SELECT av.initial_time::date AS dia, a.name AS evento, count(*) AS n
@@ -277,7 +285,8 @@ async def causa_raiz(unit_id: int, ate: Optional[date] = Query(None), dias: int 
             "dia": d.isoformat(),
             "km": round(km, 1) if km is not None and 0 <= km <= 2000 else None,
             "horas": round(float(r["horas"]), 1) if r.get("horas") else None,
-            "km_l": round(float(r["km_comb"]) / litros, 2) if litros and r.get("km_comb") else None,
+            # Dia quase parado não tem km/l que signifique algo (0,1 km com 0,5 L = 0,2 km/l).
+            "km_l": round(float(r["km_comb"]) / litros, 2) if litros and r.get("km_comb") and km and km >= 20 else None,
             "motoristas": r.get("motoristas"),
             "temp_max": round(float(s["temp_max"])) if s.get("temp_max") else None,
             "v_repouso": round(float(s["v_repouso"]), 1) if s.get("v_repouso") else None,
@@ -302,8 +311,16 @@ async def causa_raiz(unit_id: int, ate: Optional[date] = Query(None), dias: int 
     for x in linha:
         for e in x["eventos"] + x["camera"]:
             total_ev[e["evento"]] = total_ev.get(e["evento"], 0) + e["n"]
+    km_total = sum(x["km"] or 0 for x in linha)
     for nome, n in sorted(total_ev.items(), key=lambda t: -t[1])[:3]:
-        if n >= 10:
+        if n < 10:
+            continue
+        # Mais de um evento por km não é condução: é configuração ou sensor do equipamento
+        # (TDV-7E89, CECOTI: 2.393 acelerações bruscas em 488 km num dia, 06/10/2026).
+        if km_total >= 50 and n / km_total >= 1:
+            pontos.append(f"{nome}: {n} ocorrências em {round(km_total)} km ({n / km_total:.1f} por km) — contagem suspeita do equipamento; "
+                          "conferir a configuração antes de cobrar o motorista.")
+        else:
             pontos.append(f"{nome}: {n} ocorrências no período.")
     kmls = [x["km_l"] for x in linha if x["km_l"]]
     if len(kmls) >= 4 and kmls[-1] < 0.85 * (sum(kmls[:-1]) / len(kmls[:-1])):
