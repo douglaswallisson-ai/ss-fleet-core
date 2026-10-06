@@ -220,3 +220,16 @@ def test_nota_soma_os_motivos_e_limita_em_100():
     v = {"alertas": [{"nivel": "critico", "titulo": "Motor quente", "valor": "108 °C"}] * 4, "vencidos": 2, "vencendo": 0}
     pontos, motivos = nota(v, [], 1.0)
     assert pontos == 100 and motivos[0]["pontos"] == 30
+
+
+def test_arla_oscilando_e_suspeito_e_nao_alerta():
+    """RNY-4F94, 06/10/2026: 90 -> 6 -> 89 -> 0% em minutos; mediana 8% virava "ARLA no fim"."""
+    v, h = veiculo(arla=74.0), hist(arla_n=500.0, arla_total=520.0, arla_med=8.0, arla_saltos=180.0)
+    assert [s["sinal"] for s in _suspeitos(v, h)] == ["arla"]
+    assert "arla" not in chaves(_alertas_do_veiculo(v, h))
+
+
+def test_arla_abastecido_nao_e_suspeito():
+    """Abastecer é um salto só, para cima."""
+    v, h = veiculo(), hist(arla_n=500.0, arla_total=500.0, arla_med=60.0, arla_saltos=1.0)
+    assert _suspeitos(v, h) == []

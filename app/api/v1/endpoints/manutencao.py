@@ -190,6 +190,10 @@ async def _frota(group_id: int) -> list[dict]:
 #   pressão de óleo de verdade varia com a rotação;
 # - ARLA que, no mesmo dia, aparece no fim (≤ 5%) e cheio (≥ 95%): nível de
 #   tanque cai devagar e só sobe ao abastecer;
+# - ARLA que salta mais de 30 pontos entre uma leitura e a seguinte 3 vezes ou mais
+#   em 24 h: abastecer é UM salto para cima; vários saltos são dois sinais misturados
+#   (RNY-4F94, 06/10/2026: 90 → 6 → 89 → 0% em 3 minutos, andando a 95 km/h; o
+#   alerta "ARLA no fim" saía com a mediana de 8% e o desenho mostrava 74%);
 # - tensão abaixo de 5 V: equipamento sem alimentação ou leitura perdida;
 # - óleo que cai quando a rotação sobe e nunca passa de ~255: o valor estoura
 #   a escala de 1 byte e volta do zero (CECOTI, 05/10/2026: 120–162 kPa entre
@@ -201,6 +205,8 @@ async def _frota(group_id: int) -> list[dict]:
 #   o motor QUENTE (≥ 75 °C): motor frio tem pressão alta e estoura mesmo em
 #   marcha lenta (QOB-6291: 4 a 248 kPa a 69 °C; mediana de 7 dias 188 kPa).
 MIN_LEITURAS = 10
+ARLA_SALTO_PONTOS = 30
+ARLA_SALTOS_MAX = 3
 OLEO_TETO = 240  # kPa: perto do limite de 1 byte (255) — a partir daqui a leitura estoura
 
 
@@ -250,6 +256,21 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
     )
     for r in tetos:
         out.setdefault(r["unit_id"], {})["oleo_max_7d"] = float(r["oleo_max_7d"]) if r["oleo_max_7d"] is not None else None
+    saltos = await _ler(
+        """
+        SELECT x.unit_id, count(*) FILTER (WHERE abs(x.a - x.ant) > :pts) AS arla_saltos
+        FROM (SELECT d.unit_id, d.can_def_level_percent AS a,
+                     lag(d.can_def_level_percent) OVER (PARTITION BY d.unit_id ORDER BY d.local_time) AS ant
+              FROM mova.dev_status_30 d
+              WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
+                AND d.local_time >= now() - interval '24 hours'
+                AND d.can_def_level_percent BETWEEN 0 AND 100) x
+        GROUP BY x.unit_id
+        """,
+        {"g": group_id, "pts": ARLA_SALTO_PONTOS},
+    )
+    for r in saltos:
+        out.setdefault(r["unit_id"], {})["arla_saltos"] = float(r["arla_saltos"] or 0)
     return out
 
 
@@ -270,6 +291,9 @@ def _suspeitos(v: dict, h: dict) -> list[dict]:
     if (h.get("arla_codigo") or 0) >= MIN_LEITURAS and h["arla_codigo"] >= (h.get("arla_total") or 0) / 2:
         s.append({"sinal": "arla", "titulo": "ARLA sem leitura válida",
                   "detalhe": f"{h['arla_codigo']:.0f} de {h['arla_total']:.0f} leituras de ARLA nas últimas 24 h vieram como 102% (código de \"sem informação\" do equipamento); os poucos valores entre 0 e 100% aparecem soltos entre eles e não são o nível do tanque. Conferir a configuração do equipamento."})
+    elif (h.get("arla_saltos") or 0) >= ARLA_SALTOS_MAX:
+        s.append({"sinal": "arla", "titulo": "Nível de ARLA oscilando",
+                  "detalhe": f"Nas últimas 24 h o nível saltou mais de {ARLA_SALTO_PONTOS} pontos de uma leitura para a seguinte {h['arla_saltos']:.0f} vezes. Tanque de ARLA cai devagar e só sobe ao abastecer: o equipamento está misturando dois sinais, e nenhum valor (nem o atual) é confiável. Conferir a configuração do CAN."})
     elif h.get("arla_baixo", 0) > 0 and h.get("arla_cheio", 0) > 0:
         s.append({"sinal": "arla", "titulo": "Nível de ARLA inconsistente",
                   "detalhe": f"Nas últimas 24 h o nível apareceu no fim ({h['arla_baixo']:.0f} leituras com até 5%) e cheio ({h['arla_cheio']:.0f} leituras com 95% ou mais). Conferir o sensor do tanque."})
@@ -279,6 +303,12 @@ def _suspeitos(v: dict, h: dict) -> list[dict]:
                   "detalhe": f"Última leitura de {tensao:.1f} V: equipamento sem alimentação ou leitura perdida."
                              + (f" Com o motor ligado, nas últimas 24 h, a tensão ficou em {h['v_lig_med']:.1f} V." if h.get("v_lig_med") else "")})
     return s
+
+
+def _sinais_bloqueados(suspeitos: list[dict]) -> set[str]:
+    """Campos de `sinais` que não podem ser exibidos porque o sensor está suspeito."""
+    mapa = {"oleo": "oleo", "oleo_escala": "oleo", "arla": "arla", "bateria": "voltage"}
+    return {mapa[x["sinal"]] for x in suspeitos if x["sinal"] in mapa}
 
 
 def _alertas_do_veiculo(v: dict, h: Optional[dict] = None) -> list[dict]:
@@ -504,7 +534,10 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
         veiculos.append({
             **{k: v[k] for k in ("unit_id", "placa", "prefixo", "modelo", "ano", "categoria_id", "categoria", "odometro_km", "odometro_travado", "horimetro_h")},
             "ultimo_sinal": v["local_time"],
-            "sinais": {k: v[k] for k in ("temp", "oleo", "voltage", "arla", "combustivel", "ar_freio", "rpm")},
+            # Sinal com sensor suspeito não vai para o desenho: mostrar o valor atual dele
+            # contradiria o aviso (RNY-4F94: desenho com 74% de ARLA e alerta de 8%).
+            "sinais": {k: (None if k in _sinais_bloqueados(suspeitos) else v[k])
+                       for k in ("temp", "oleo", "voltage", "arla", "combustivel", "ar_freio", "rpm")},
             "plano": plano and {"id": plano["id"], "nome": plano["nome"], "escopo": plano["escopo"]},
             "itens": itens,
             "vencidos": sum(1 for i in itens if i["situacao"] == "vencido"),
