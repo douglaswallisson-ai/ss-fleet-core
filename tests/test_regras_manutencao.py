@@ -134,9 +134,24 @@ def test_arla_baixo_coerente_vira_alerta():
 
 # ------------------------------------------------------------ temperatura
 
+def test_pico_de_temperatura_sob_carga_nao_e_alerta():
+    """RVB-3E31, 07/10/2026: última leitura 96 °C, mediana de 30 min 92 °C — pico normal, não "Motor quente"."""
+    assert _alertas_do_veiculo(veiculo(temp=96.0), hist(temp_n=15.0, temp_med=92.0, temp_n_crit=0.0)) == []
+
+
 def test_temperatura_atencao_e_critico():
-    assert [a["nivel"] for a in _alertas_do_veiculo(veiculo(temp=97.0), hist())] == ["atencao"]
-    assert [a["nivel"] for a in _alertas_do_veiculo(veiculo(temp=108.0), hist())] == ["critico"]
+    """Vale a mediana dos últimos 30 min com o motor ligado; crítico com 2 leituras de 107 °C ou mais."""
+    assert [a["nivel"] for a in _alertas_do_veiculo(veiculo(temp=101.0), hist(temp_n=12.0, temp_med=101.0, temp_n_crit=0.0))] == ["atencao"]
+    assert [a["nivel"] for a in _alertas_do_veiculo(veiculo(temp=108.0), hist(temp_n=12.0, temp_med=104.0, temp_n_crit=3.0))] == ["critico"]
+    # Poucas leituras na janela: não dá para afirmar.
+    assert _alertas_do_veiculo(veiculo(temp=108.0), hist(temp_n=2.0, temp_med=108.0, temp_n_crit=2.0)) == []
+
+
+def test_arla_com_lixo_intercalado_e_suspeito():
+    """RUE-5G20, 07/10/2026: 0–2% intercalado com o nível real de ~25% (saltos menores que 30 pontos)."""
+    v, h = veiculo(arla=1.0), hist(arla_n=380.0, arla_total=385.0, arla_med=1.0, arla_saltos=0.0, arla_subidas=40.0, arla_quedas=40.0)
+    assert [x["sinal"] for x in _suspeitos(v, h)] == ["arla"]
+    assert "arla" not in chaves(_alertas_do_veiculo(v, h))
 
 
 def test_temperatura_absurda_e_ignorada():
@@ -232,4 +247,10 @@ def test_arla_oscilando_e_suspeito_e_nao_alerta():
 def test_arla_abastecido_nao_e_suspeito():
     """Abastecer é um salto só, para cima."""
     v, h = veiculo(), hist(arla_n=500.0, arla_total=500.0, arla_med=60.0, arla_saltos=1.0)
+    assert _suspeitos(v, h) == []
+
+
+def test_abastecimento_em_etapas_nao_e_suspeito():
+    """UAO-0G30, 07/10/2026: 55 → 88 → 99% em 2 min (abastecimento gravado em etapas)."""
+    v, h = veiculo(arla=99.0), hist(arla_n=500.0, arla_total=500.0, arla_med=60.0, arla_saltos=1.0, arla_subidas=3.0, arla_quedas=0.0)
     assert _suspeitos(v, h) == []

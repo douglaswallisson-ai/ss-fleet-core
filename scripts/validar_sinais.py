@@ -72,6 +72,15 @@ def esperado(regs, ultimo_sinal_recente, teto7=0.0):
     arla_baixo = [f(r["arla"]) for r in regs if r["arla"] is not None and f(r["arla"]) <= 5]
     arla_cheio = [x for x in arla_validas if x >= 95]
     ultimo_v = max(regs, key=lambda r: r["local_time"])["voltage"] if regs else None
+    # ARLA oscilando (06–07/10/2026): saltos > 30 pontos 3+ vezes, ou subir E descer 10+ pontos 3+ vezes cada.
+    seq = [f(r["arla"]) for r in sorted(regs, key=lambda r: r["local_time"]) if r["arla"] is not None and 0 <= f(r["arla"]) <= 100]
+    dif = [b - a for a, b in zip(seq, seq[1:])]
+    arla_saltos = sum(1 for d in dif if abs(d) > 30)
+    arla_sobe, arla_desce = sum(1 for d in dif if d >= 10), sum(1 for d in dif if d <= -10)
+    # Temperatura (07/10/2026): mediana dos últimos 30 min com o motor ligado; crítico com 2+ leituras de 107 °C.
+    agora = max((r["local_time"] for r in regs), default=None)
+    t30 = [f(r["temp"]) for r in regs if agora and r["local_time"] >= agora - timedelta(minutes=30)
+           and rpm(r) >= 500 and r["temp"] is not None and 1 <= f(r["temp"]) <= 150]
 
     sus, al = set(), {}
     if not ultimo_sinal_recente:
@@ -83,6 +92,8 @@ def esperado(regs, ultimo_sinal_recente, teto7=0.0):
     elif oleo_lig and max(oleo_lig) >= 240 and len(oleo_alto) >= MIN and oleo_lenta and med(oleo_alto) < med(oleo_lenta) / 2:
         sus.add("oleo_escala")
     if len(arla_cod) >= MIN and len(arla_cod) >= len(arla_pos) / 2:
+        sus.add("arla")
+    elif arla_saltos >= 3 or (arla_sobe >= 3 and arla_desce >= 3):
         sus.add("arla")
     elif arla_baixo and arla_cheio:
         sus.add("arla")
@@ -98,10 +109,13 @@ def esperado(regs, ultimo_sinal_recente, teto7=0.0):
             al["bateria"] = med(v_lig)
         elif len(v_desl) >= MIN and med(v_desl) < aten:
             al["bateria"] = med(v_desl)
+    if len(t30) >= 3 and (sum(1 for t in t30 if t >= 107) >= 2 or med(t30) >= 100):
+        al["temperatura"] = med(t30)
     if "arla" not in sus and len(arla_validas) >= MIN and len(arla_validas) >= len(arla_pos) / 2 and med(arla_validas) < 10:
         al["arla"] = med(arla_validas)
     ev = {"oleo_lenta_n": len(oleo_lenta), "oleo_valores": len(set(oleo_lig)), "v_lig": med(v_lig), "v_desl": med(v_desl),
-          "arla_validas": len(arla_validas), "arla_cod": len(arla_cod)}
+          "arla_validas": len(arla_validas), "arla_cod": len(arla_cod), "arla_saltos": arla_saltos,
+          "arla_sobe": arla_sobe, "arla_desce": arla_desce, "temp_30min": med(t30)}
     return al, sus, ev
 
 

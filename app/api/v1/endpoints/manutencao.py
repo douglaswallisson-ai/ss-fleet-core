@@ -64,7 +64,10 @@ AVISO_DIAS = 15
 AVISO_HORAS = 50
 
 LIMITES = {
-    "temp_atencao": 96.0, "temp_critico": 107.0,           # °C — acima da faixa normal / máximo Cummins
+    # °C. Julgado pela mediana dos últimos 30 min com o motor ligado, não por uma leitura (07/10/2026):
+    # com 96 °C numa leitura, 63 de 99 caminhões da CECOTI davam "Motor quente" em 10 dias — é o pico
+    # normal sob carga destes motores (RVB-3E31: mediana diária 87–93 °C, pico 98–103 °C). Só 3 chegaram a 107.
+    "temp_atencao": 100.0, "temp_critico": 107.0,
     "oleo_min_kpa": 69.0, "oleo_rpm_min": 600.0,            # kPa, mínimo Cummins em marcha lenta (avaliado entre 600 e 899 rpm)
     "rpm_ligado": 500.0,                                    # acima disso o alternador deve estar carregando
     "v24_carga_min": 26.0, "v24_atencao": 24.4, "v24_critico": 24.0,   # sistema 24 V (leitura > 18 V)
@@ -207,6 +210,14 @@ async def _frota(group_id: int) -> list[dict]:
 MIN_LEITURAS = 10
 ARLA_SALTO_PONTOS = 30
 ARLA_SALTOS_MAX = 3
+# Vai e vem: subir E descer 10 pontos ou mais, 3 vezes cada, em 24 h = dois sinais misturados mesmo
+# quando a distância entre eles é menor que 30 (RUE-5G20, 07/10/2026: lixo 0–2% intercalado com o nível
+# real de ~25%; a mediana dava "ARLA no fim 2%"). Só subidas não basta: abastecimento gravado em etapas
+# (UAO-0G30: 55 → 88 → 99% em 2 min) e tanque cheio em rampa (PYX-4423: 76–100%) não são defeito.
+ARLA_SUBIDA_PONTOS = 10
+ARLA_SUBIDAS_MAX = 3
+TEMP_JANELA_MIN = 30
+TEMP_MIN_LEITURAS = 3
 OLEO_TETO = 240  # kPa: perto do limite de 1 byte (255) — a partir daqui a leitura estoura
 
 
@@ -258,7 +269,9 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
         out.setdefault(r["unit_id"], {})["oleo_max_7d"] = float(r["oleo_max_7d"]) if r["oleo_max_7d"] is not None else None
     saltos = await _ler(
         """
-        SELECT x.unit_id, count(*) FILTER (WHERE abs(x.a - x.ant) > :pts) AS arla_saltos
+        SELECT x.unit_id, count(*) FILTER (WHERE abs(x.a - x.ant) > :pts) AS arla_saltos,
+               count(*) FILTER (WHERE x.a - x.ant >= :sub) AS arla_subidas,
+               count(*) FILTER (WHERE x.ant - x.a >= :sub) AS arla_quedas
         FROM (SELECT d.unit_id, d.can_def_level_percent AS a,
                      lag(d.can_def_level_percent) OVER (PARTITION BY d.unit_id ORDER BY d.local_time) AS ant
               FROM mova.dev_status_30 d
@@ -267,10 +280,28 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
                 AND d.can_def_level_percent BETWEEN 0 AND 100) x
         GROUP BY x.unit_id
         """,
-        {"g": group_id, "pts": ARLA_SALTO_PONTOS},
+        {"g": group_id, "pts": ARLA_SALTO_PONTOS, "sub": ARLA_SUBIDA_PONTOS},
     )
     for r in saltos:
         out.setdefault(r["unit_id"], {})["arla_saltos"] = float(r["arla_saltos"] or 0)
+        out[r["unit_id"]]["arla_subidas"] = float(r["arla_subidas"] or 0)
+        out[r["unit_id"]]["arla_quedas"] = float(r["arla_quedas"] or 0)
+    # Temperatura dos últimos 30 min com o motor ligado (horário calculado aqui: com now() o banco não
+    # descarta as partições diárias).
+    temps = await _ler(
+        """
+        SELECT d.unit_id, count(*) AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY d.can_engine_coolant_temp) AS med,
+               count(*) FILTER (WHERE d.can_engine_coolant_temp >= :crit) AS n_crit
+        FROM mova.dev_status_30 d
+        WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
+          AND d.local_time >= :desde AND d.can_rpm >= 500 AND d.can_engine_coolant_temp BETWEEN 1 AND 150
+        GROUP BY d.unit_id
+        """,
+        {"g": group_id, "desde": datetime.now() - timedelta(minutes=TEMP_JANELA_MIN), "crit": LIMITES["temp_critico"]},
+    )
+    for r in temps:
+        o = out.setdefault(r["unit_id"], {})
+        o["temp_n"], o["temp_med"], o["temp_n_crit"] = float(r["n"]), float(r["med"]), float(r["n_crit"])
     return out
 
 
@@ -291,9 +322,10 @@ def _suspeitos(v: dict, h: dict) -> list[dict]:
     if (h.get("arla_codigo") or 0) >= MIN_LEITURAS and h["arla_codigo"] >= (h.get("arla_total") or 0) / 2:
         s.append({"sinal": "arla", "titulo": "ARLA sem leitura válida",
                   "detalhe": f"{h['arla_codigo']:.0f} de {h['arla_total']:.0f} leituras de ARLA nas últimas 24 h vieram como 102% (código de \"sem informação\" do equipamento); os poucos valores entre 0 e 100% aparecem soltos entre eles e não são o nível do tanque. Conferir a configuração do equipamento."})
-    elif (h.get("arla_saltos") or 0) >= ARLA_SALTOS_MAX:
+    elif (h.get("arla_saltos") or 0) >= ARLA_SALTOS_MAX or (
+            (h.get("arla_subidas") or 0) >= ARLA_SUBIDAS_MAX and (h.get("arla_quedas") or 0) >= ARLA_SUBIDAS_MAX):
         s.append({"sinal": "arla", "titulo": "Nível de ARLA oscilando",
-                  "detalhe": f"Nas últimas 24 h o nível saltou mais de {ARLA_SALTO_PONTOS} pontos de uma leitura para a seguinte {h['arla_saltos']:.0f} vezes. Tanque de ARLA cai devagar e só sobe ao abastecer: o equipamento está misturando dois sinais, e nenhum valor (nem o atual) é confiável. Conferir a configuração do CAN."})
+                  "detalhe": f"Nas últimas 24 h o nível subiu {ARLA_SUBIDA_PONTOS} pontos ou mais de uma leitura para a seguinte {h.get('arla_subidas') or 0:.0f} vezes e desceu {h.get('arla_quedas') or 0:.0f} vezes (saltos de mais de {ARLA_SALTO_PONTOS} pontos: {h.get('arla_saltos') or 0:.0f}). Tanque de ARLA cai devagar e só sobe ao abastecer: o equipamento está misturando dois sinais, e nenhum valor (nem o atual) é confiável. Conferir a configuração do CAN."})
     elif h.get("arla_baixo", 0) > 0 and h.get("arla_cheio", 0) > 0:
         s.append({"sinal": "arla", "titulo": "Nível de ARLA inconsistente",
                   "detalhe": f"Nas últimas 24 h o nível apareceu no fim ({h['arla_baixo']:.0f} leituras com até 5%) e cheio ({h['arla_cheio']:.0f} leituras com 95% ou mais). Conferir o sensor do tanque."})
@@ -324,14 +356,15 @@ def _alertas_do_veiculo(v: dict, h: Optional[dict] = None) -> list[dict]:
     if not recente:
         return a
     suspeitos = {s["sinal"] for s in _suspeitos(v, h)}
-    t = v.get("temp")
-    if t is not None and t < 150:
-        if t >= L["temp_critico"]:
-            a.append({"chave": "temperatura", "titulo": "Motor superaquecendo", "nivel": "critico", "valor": f"{t:.0f} °C",
-                      "detalhe": f"Temperatura do líquido de arrefecimento em {t:.0f} °C (crítico a partir de {L['temp_critico']:.0f} °C)."})
-        elif t >= L["temp_atencao"]:
-            a.append({"chave": "temperatura", "titulo": "Motor quente", "nivel": "atencao", "valor": f"{t:.0f} °C",
-                      "detalhe": f"Temperatura em {t:.0f} °C (atenção a partir de {L['temp_atencao']:.0f} °C)."})
+    # Temperatura: o que vale é a mediana dos últimos 30 min com o motor ligado; pico isolado sob carga é normal.
+    tm, tn = h.get("temp_med"), h.get("temp_n") or 0
+    if tm is not None and tn >= TEMP_MIN_LEITURAS:
+        if (h.get("temp_n_crit") or 0) >= 2:
+            a.append({"chave": "temperatura", "titulo": "Motor superaquecendo", "nivel": "critico", "valor": f"{tm:.0f} °C",
+                      "detalhe": f"{h['temp_n_crit']:.0f} leituras com {L['temp_critico']:.0f} °C ou mais nos últimos {TEMP_JANELA_MIN} min com o motor ligado (mediana {tm:.0f} °C; máximo Cummins {L['temp_critico']:.0f} °C)."})
+        elif tm >= L["temp_atencao"]:
+            a.append({"chave": "temperatura", "titulo": "Motor quente", "nivel": "atencao", "valor": f"{tm:.0f} °C",
+                      "detalhe": f"Mediana de {tm:.0f} °C nos últimos {TEMP_JANELA_MIN} min com o motor ligado ({tn:.0f} leituras; atenção a partir de {L['temp_atencao']:.0f} °C sustentados)."})
     # Óleo: mediana em marcha lenta (600–899 rpm) nas últimas 24 h — acima disso a leitura estoura.
     o = h.get("oleo_med")
     if "oleo" not in suspeitos and "oleo_escala" not in suspeitos and o is not None and h.get("oleo_n", 0) >= MIN_LEITURAS and o < L["oleo_min_kpa"]:
