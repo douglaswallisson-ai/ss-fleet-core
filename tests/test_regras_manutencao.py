@@ -82,7 +82,7 @@ def test_bateria_fraca_em_repouso_24v_e_atencao():
     """RTR-8I02: ~23 V parado com o alternador carregando 28,6 V."""
     v, h = veiculo(), hist(v_desl_med=23.0, v_lig_med=28.6)
     a = [x for x in _alertas_do_veiculo(v, h) if x["chave"] == "bateria"]
-    assert len(a) == 1 and a[0]["titulo"] == "Bateria fraca em repouso" and a[0]["nivel"] == "atencao"
+    assert len(a) == 1 and a[0]["titulo"] == "Bateria não está segurando a carga" and a[0]["nivel"] == "atencao"
 
 
 def test_tensao_no_limite_nao_alerta_folga_de_medicao():
@@ -95,7 +95,7 @@ def test_tensao_no_limite_nao_alerta_folga_de_medicao():
 def test_alternador_sem_carregar():
     v, h = veiculo(), hist(v_lig_med=24.5)
     a = [x for x in _alertas_do_veiculo(v, h) if x["chave"] == "bateria"]
-    assert a and a[0]["titulo"] == "Alternador sem carregar"
+    assert a and a[0]["titulo"] == "Alternador não está carregando"
 
 
 def test_sistema_12v_usa_limites_de_12v():
@@ -116,7 +116,7 @@ def test_tensao_zero_e_suspeito_e_nao_alerta():
 def test_arla_com_codigo_102_e_suspeito_e_nao_alerta():
     """TDP-2E24: 102% (sem informação) quase o dia todo e um 5% solto — o nível real era 41%."""
     v, h = veiculo(), hist(arla_codigo=260, arla_total=273, arla_n=13, arla_baixo=13, arla_med=5.0)
-    assert [s["titulo"] for s in _suspeitos(v, h)] == ["ARLA sem leitura válida"]
+    assert [s["titulo"] for s in _suspeitos(v, h)] == ["ARLA: o rastreador não está recebendo o nível"]
     assert "arla" not in chaves(_alertas_do_veiculo(v, h))
 
 

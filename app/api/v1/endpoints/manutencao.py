@@ -38,6 +38,7 @@ O horímetro fica de fora dos vencimentos até a unidade ser confirmada
 """
 
 import json
+import re
 import sqlite3
 import threading
 from datetime import date, datetime, timedelta
@@ -305,35 +306,58 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
     return out
 
 
+_DECIMAL = re.compile(r"(?<=\d)\.(?=\d)")
+
+
+def _em_portugues(itens: list[dict]) -> list[dict]:
+    """Número com vírgula nos textos que vão para a tela e para o cliente (23,5 V, não 23.5 V)."""
+    for x in itens:
+        for k in ("valor", "detalhe", "acao"):
+            if isinstance(x.get(k), str):
+                x[k] = _DECIMAL.sub(",", x[k])
+    return itens
+
+
 def _suspeitos(v: dict, h: dict) -> list[dict]:
+    return _em_portugues(_suspeitos_brutos(v, h))
+
+
+def _suspeitos_brutos(v: dict, h: dict) -> list[dict]:
     s = []
     if h.get("oleo_todas", 0) >= MIN_LEITURAS and h.get("oleo_valores") == 1:
-        s.append({"sinal": "oleo", "titulo": "Pressão de óleo travada",
-                  "detalhe": f"O sensor mandou {h['oleo_max']:.0f} kPa em todas as {h['oleo_todas']:.0f} leituras com o motor ligado nas últimas 24 h. Pressão real varia com a rotação: conferir o sensor ou a configuração do CAN."})
+        s.append({"sinal": "oleo", "titulo": "Pressão do óleo: o rastreador não está medindo",
+                  "detalhe": f"O valor chega sempre igual ({h['oleo_max']:.0f} kPa), com o motor em marcha lenta ou acelerando. A pressão de verdade muda com a rotação, então esse número não é a pressão do óleo. Enquanto isso, a plataforma não consegue avisar sobre o óleo deste veículo.",
+                  "acao": "A SS ajusta a leitura do óleo no rastreador. O caminhão não precisa ir para a oficina por isso."})
     elif (h.get("oleo_max_7d") or 0) >= OLEO_TETO and h.get("oleo_n", 0) >= MIN_LEITURAS and h.get("oleo_med") is not None and h["oleo_med"] < LIMITES["oleo_min_kpa"]:
-        s.append({"sinal": "oleo_escala", "titulo": "Pressão de óleo inconclusiva",
-                  "detalhe": f"Em marcha lenta a leitura está em {h['oleo_med']:.0f} kPa, mas este sensor chegou a {h['oleo_max_7d']:.0f} kPa nos últimos 7 dias: a escala do equipamento vai só até 255 e volta do zero, então uma leitura baixa pode ser uma pressão alta que estourou. Não dá para afirmar pressão baixa — conferir com manômetro se houver luz de óleo no painel."})
+        s.append({"sinal": "oleo_escala", "titulo": "Pressão do óleo: leitura não confiável",
+                  "detalhe": f"A leitura em marcha lenta está baixa ({h['oleo_med']:.0f} kPa), mas o mesmo rastreador já mostrou {h['oleo_max_7d']:.0f} kPa nesta semana. Este modelo de rastreador só conta até 255 e depois recomeça do zero, então um número baixo pode ser uma pressão alta. Não dá para afirmar que a pressão está baixa.",
+                  "acao": "Se a luz do óleo acender no painel, conferir com manômetro na oficina. A SS ajusta a leitura no rastreador."})
     elif (h.get("oleo_max") or 0) >= 240 and h.get("oleo_n_alto", 0) >= MIN_LEITURAS and h.get("oleo_med") and h.get("oleo_med_alto") is not None             and h["oleo_med_alto"] < h["oleo_med"] / 2:
-        s.append({"sinal": "oleo_escala", "titulo": "Pressão de óleo estourando a escala",
-                  "detalhe": f"Acima de 1.600 rpm a pressão aparece em {h['oleo_med_alto']:.0f} kPa, menos da metade dos {h['oleo_med']:.0f} kPa em marcha lenta, e nunca passa de {h['oleo_max']:.0f}. A pressão real sobe com a rotação: o valor passa de 255 e o equipamento volta do zero. Para alerta vale só a leitura em marcha lenta."})
+        s.append({"sinal": "oleo_escala", "titulo": "Pressão do óleo: rastreador não mede valores altos",
+                  "detalhe": f"Acelerando, a pressão aparece em {h['oleo_med_alto']:.0f} kPa, menos do que em marcha lenta ({h['oleo_med']:.0f} kPa). Na vida real ela sobe quando o motor acelera: o rastreador só conta até 255 e recomeça do zero. Por isso a plataforma avalia o óleo só em marcha lenta.",
+                  "acao": "Nada a fazer no caminhão. A SS ajusta a leitura no rastreador."})
     # ARLA acima de 100% = código "sem informação" do J1939 (SPN 1761: 0,4%/bit,
     # 0xFF = 102%). Na CECOTI começou às 12h40–12h44 de 30/09/2026 em 12 VW ao
     # mesmo tempo (mudança no equipamento, não no caminhão).
     if (h.get("arla_codigo") or 0) >= MIN_LEITURAS and h["arla_codigo"] >= (h.get("arla_total") or 0) / 2:
-        s.append({"sinal": "arla", "titulo": "ARLA sem leitura válida",
-                  "detalhe": f"{h['arla_codigo']:.0f} de {h['arla_total']:.0f} leituras de ARLA nas últimas 24 h vieram como 102% (código de \"sem informação\" do equipamento); os poucos valores entre 0 e 100% aparecem soltos entre eles e não são o nível do tanque. Conferir a configuração do equipamento."})
+        s.append({"sinal": "arla", "titulo": "ARLA: o rastreador não está recebendo o nível",
+                  "detalhe": f"Em {h['arla_codigo']:.0f} de {h['arla_total']:.0f} leituras das últimas 24 h, o caminhão respondeu \"sem informação\" sobre o tanque de ARLA. Não dá para saber o nível pela plataforma.",
+                  "acao": "Conferir o nível no painel do caminhão. A SS ajusta a leitura do ARLA no rastreador."})
     elif (h.get("arla_saltos") or 0) >= ARLA_SALTOS_MAX or (
             (h.get("arla_subidas") or 0) >= ARLA_SUBIDAS_MAX and (h.get("arla_quedas") or 0) >= ARLA_SUBIDAS_MAX):
-        s.append({"sinal": "arla", "titulo": "Nível de ARLA oscilando",
-                  "detalhe": f"Nas últimas 24 h o nível subiu {ARLA_SUBIDA_PONTOS} pontos ou mais de uma leitura para a seguinte {h.get('arla_subidas') or 0:.0f} vezes e desceu {h.get('arla_quedas') or 0:.0f} vezes (saltos de mais de {ARLA_SALTO_PONTOS} pontos: {h.get('arla_saltos') or 0:.0f}). Tanque de ARLA cai devagar e só sobe ao abastecer: o equipamento está misturando dois sinais, e nenhum valor (nem o atual) é confiável. Conferir a configuração do CAN."})
+        s.append({"sinal": "arla", "titulo": "ARLA: leitura misturada",
+                  "detalhe": f"O nível sobe e desce de um minuto para o outro ({h.get('arla_subidas') or 0:.0f} subidas e {h.get('arla_quedas') or 0:.0f} descidas grandes em 24 h). Um tanque de ARLA só desce devagar e só sobe quando abastece: o rastreador está misturando duas informações, e nenhum valor mostrado é confiável.",
+                  "acao": "Conferir o nível no painel do caminhão. A SS ajusta a leitura do ARLA no rastreador."})
     elif h.get("arla_baixo", 0) > 0 and h.get("arla_cheio", 0) > 0:
-        s.append({"sinal": "arla", "titulo": "Nível de ARLA inconsistente",
-                  "detalhe": f"Nas últimas 24 h o nível apareceu no fim ({h['arla_baixo']:.0f} leituras com até 5%) e cheio ({h['arla_cheio']:.0f} leituras com 95% ou mais). Conferir o sensor do tanque."})
+        s.append({"sinal": "arla", "titulo": "ARLA: leitura contraditória",
+                  "detalhe": f"No mesmo dia o tanque apareceu vazio ({h['arla_baixo']:.0f} leituras com até 5%) e cheio ({h['arla_cheio']:.0f} leituras com 95% ou mais). As duas coisas não podem ser verdade ao mesmo tempo.",
+                  "acao": "Conferir o nível no painel do caminhão. A SS confere o sensor e a leitura no rastreador."})
     tensao = v.get("voltage")
     if tensao is not None and tensao < 5:
-        s.append({"sinal": "bateria", "titulo": "Tensão sem leitura",
-                  "detalhe": f"Última leitura de {tensao:.1f} V: equipamento sem alimentação ou leitura perdida."
-                             + (f" Com o motor ligado, nas últimas 24 h, a tensão ficou em {h['v_lig_med']:.1f} V." if h.get("v_lig_med") else "")})
+        s.append({"sinal": "bateria", "titulo": "Bateria: o rastreador ficou sem energia",
+                  "detalhe": f"A última leitura veio com {tensao:.1f} V, o que acontece quando o rastreador perde a alimentação, não quando a bateria do caminhão está fraca."
+                             + (f" Com o motor ligado, nas últimas 24 h, a tensão estava normal ({h['v_lig_med']:.1f} V)." if h.get("v_lig_med") else ""),
+                  "acao": "A SS confere a instalação do rastreador."})
     return s
 
 
@@ -344,6 +368,10 @@ def _sinais_bloqueados(suspeitos: list[dict]) -> set[str]:
 
 
 def _alertas_do_veiculo(v: dict, h: Optional[dict] = None) -> list[dict]:
+    return _em_portugues(_alertas_brutos(v, h))
+
+
+def _alertas_brutos(v: dict, h: Optional[dict] = None) -> list[dict]:
     """Sinais fora do normal (corretiva). Cada alerta pode virar OS.
 
     Temperatura usa a última leitura (superaquecimento é imediato). Óleo,
@@ -380,13 +408,17 @@ def _alertas_do_veiculo(v: dict, h: Optional[dict] = None) -> list[dict]:
         lim_carga, lim_repouso = (L["v24_alerta_carga"], L["v24_alerta_repouso"]) if ref > 18 else (L["v12_alerta_carga"], L["v12_alerta_repouso"])
         vl, vd = h.get("v_lig_med"), h.get("v_desl_med")
         if vl is not None and h.get("v_lig_n", 0) >= MIN_LEITURAS and vl < lim_carga:
-            a.append({"chave": "bateria", "titulo": "Alternador sem carregar", "nivel": "critico" if vl < crit else "atencao", "valor": f"{vl:.1f} V",
-                      "detalhe": f"Com o motor ligado, a tensão ficou em {vl:.1f} V (mediana de 24 h, medida na alimentação do rastreador) num sistema de {sist}; carregando deveria passar de {carga} V."})
+            a.append({"chave": "bateria", "titulo": "Alternador não está carregando", "nivel": "critico" if vl < crit else "atencao", "valor": f"{vl:.1f} V",
+                      "detalhe": f"Com o motor ligado, a tensão ficou em {vl:.1f} V nas últimas 24 h. Num caminhão de {sist}, com o alternador carregando, ela deveria passar de {carga:.0f} V.",
+                      "acao": "Levar à oficina para testar o alternador e a correia. Sem carga, a bateria descarrega e o caminhão pode não dar partida."})
         elif vd is not None and h.get("v_desl_n", 0) >= MIN_LEITURAS and vd < lim_repouso:
             # Bateria fraca não para o veículo (o alternador recarrega): atenção, não crítico.
-            a.append({"chave": "bateria", "titulo": "Bateria fraca em repouso", "nivel": "atencao", "valor": f"{vd:.1f} V",
-                      "detalhe": f"Com o motor desligado, a tensão ficou em {vd:.1f} V (mediana de 24 h, medida na alimentação do rastreador) num sistema de {sist}; abaixo de {aten} V a bateria tem menos de metade da carga."
-                                 + (f" O alternador está carregando ({vl:.1f} V com o motor ligado): o problema é a bateria ou consumo com o veículo parado." if vl and vl >= carga else "")})
+            alt_ok = bool(vl and vl >= carga)
+            a.append({"chave": "bateria", "titulo": "Bateria não está segurando a carga", "nivel": "atencao", "valor": f"{vd:.1f} V parado",
+                      "detalhe": (f"Com o motor ligado o alternador carrega bem ({vl:.1f} V). " if alt_ok else "")
+                                 + f"Mas com o motor desligado a tensão fica em {vd:.1f} V (mediana das últimas 24 h). Num caminhão de {sist}, uma bateria boa fica acima de {aten:.1f} V parada; abaixo disso ela está com menos da metade da carga e pode falhar na partida."
+                                 + (" Por isso o desenho pode mostrar um número alto com o motor ligado e o alerta continuar valendo." if alt_ok else ""),
+                      "acao": "Testar a bateria na oficina. Se ela estiver boa, procurar algum equipamento puxando energia com o caminhão desligado."})
     # ARLA: mediana de 24 h das leituras acima de 0 (0 o tempo todo = veículo sem sensor de ARLA).
     arla = h.get("arla_med")
     # Maioria acima de 100% = código de "sem informação" (TDP-2E24: 102% o dia todo e um 5% solto).
@@ -569,8 +601,12 @@ async def painel(group_id: int = Query(...), user=Depends(require_permission("re
             "ultimo_sinal": v["local_time"],
             # Sinal com sensor suspeito não vai para o desenho: mostrar o valor atual dele
             # contradiria o aviso (RNY-4F94: desenho com 74% de ARLA e alerta de 8%).
-            "sinais": {k: (None if k in _sinais_bloqueados(suspeitos) else v[k])
-                       for k in ("temp", "oleo", "voltage", "arla", "combustivel", "ar_freio", "rpm")},
+            "sinais": {**{k: (None if k in _sinais_bloqueados(suspeitos) else v[k])
+                          for k in ("temp", "oleo", "voltage", "arla", "combustivel", "ar_freio", "rpm")},
+                       # Tensão com o motor ligado (alternador) e parado (bateria), medianas de 24 h: a última leitura
+                       # sozinha mostrava 28,7 V (motor ligado) ao lado de "bateria fraca 23,5 V" (RTR-8I02, 07/10/2026).
+                       "v_ligado": None if "voltage" in _sinais_bloqueados(suspeitos) else hv.get("v_lig_med"),
+                       "v_repouso": None if "voltage" in _sinais_bloqueados(suspeitos) else hv.get("v_desl_med")},
             "plano": plano and {"id": plano["id"], "nome": plano["nome"], "escopo": plano["escopo"]},
             "itens": itens,
             "vencidos": sum(1 for i in itens if i["situacao"] == "vencido"),
