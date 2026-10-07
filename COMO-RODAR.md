@@ -60,12 +60,12 @@ Precisa estar no ar **antes** do servidor.
 Teste em http://localhost:8000/docs: deve abrir a lista de rotas.
 
 ### 6. Arquivos da pasta `data/`
-A pasta `data/` fica fora do GitHub. Ela é o **armazenamento provisório** (contratos, estoque, CCO etc.) e se cria sozinha. Duas exceções:
+A pasta `data/` é o **armazenamento provisório** (contratos, estoque, CCO etc.): os bancos `.sqlite` ficam fora do GitHub e se criam sozinhos. Dois arquivos de base vêm junto:
 
 | Arquivo | Para quê | Como conseguir |
 |---|---|---|
 | `data/pracas_pedagio.csv` | praças de pedágio da ANTT (dado público) | já vem no repositório |
-| `data/estoque_base.json` | os 2.589 seriais da planilha de Operações (Estoque de equipamentos) | copiar do computador do PM. Sem ele, a tela de Estoque fica vazia |
+| `data/estoque_base.json` | os 2.589 seriais da planilha de Operações (Estoque de equipamentos) | já vem no repositório (dado interno; o repositório é privado) |
 
 Os contratos dos clientes existentes se criam sozinhos a partir do banco, na primeira vez que a tela de Contratos abre.
 
