@@ -17,7 +17,7 @@ Padrão de código: ver `../../../../CLAUDE.md` (raiz do projeto), seção 2.
 | `timeline.py` | `/eventos/timeline` | linha do tempo de eventos por veículo/motorista | não | `_docs/tracking-e-timeline.md` |
 | `events.py` | `/events` | alarmes e ocorrências com reconhecimento | `acknowledge` grava em produção — **não usar** | `_docs/eventos-e-video.md` |
 | `video.py` | `/video` | câmeras e ocorrências DMS/ADAS | não | `_docs/eventos-e-video.md` |
-| `cco.py` | `/cco` | Painel CCO: veículos (ícone por categoria), avisos de segurança/câmera/Monitor/manutenção agrupados, Visto/Tratado | provisório `data/cco.sqlite` (marcações) | docstring do módulo |
+| `cco.py` | `/cco` | Painel CCO: veículos (ícone por categoria), avisos de segurança/câmera/Monitor/manutenção/operação (parado ligado, área de risco, desvio de rota, parada fora do lugar) agrupados, Visto/Tratado, turno | provisório `data/cco.sqlite` (marcações) | docstring do módulo |
 | `manutencao_risco.py` | `/manutencao-risco` | nota de risco com motivos, tendência (bateria, temperatura, consumo), causa raiz | não | docstring do módulo |
 | `estoque.py` | `/estoque` | estoque de equipamentos: serial × placa (ao vivo) × contrato/aditivo; expedição, manutenção, devolução | provisório `data/estoque.sqlite` (base `data/estoque_base.json`) | `_docs/estoque.md` |
 | `contratos.py` | `/contratos` | contrato de todo cliente; grupo novo só por contrato; clientes existentes pré-preenchidos e sem trava; nunca encerra sozinho | provisório `data/contratos.sqlite` | `_docs/contratos.md` |
@@ -33,7 +33,8 @@ Padrão de código: ver `../../../../CLAUDE.md` (raiz do projeto), seção 2.
 | `manutencao.py` | `/manutencao` | preventiva (planos) e corretiva (alertas → OS) | SQLite `manutencao` | `_docs/manutencao.md` |
 | `jornada.py` | `/jornada` | Lei do Motorista, escala, espelho de ponto, identificação | SQLite `jornada` | `_docs/jornada.md` |
 | `escala_viagem.py` | `/escala-viagem` | plano de viagem para a GR + conformidade | SQLite `escala_viagem` | `_docs/escala-e-roteirizacao.md` |
-| `roteirizacao.py` | `/roteirizacao` | km, tempo com pausas legais, combustível, pedágio | não | `_docs/escala-e-roteirizacao.md` |
+| `roteirizacao.py` | `/roteirizacao` | km, tempo com pausas legais, combustível, pedágio; desvio de áreas de risco pelo motor (`app/core/roteador.py`) e `/rotograma` | não | `_docs/escala-e-roteirizacao.md` |
+| `areas_risco.py` | `/areas-risco` | áreas de risco (cercas com categoria 8/9, marcadas, desenhadas) e programação de viagens (veículo + rota + horário) para os avisos de desvio no CCO | provisório `data/rotas.sqlite` | `app/core/areas_risco.py` |
 | `operacao.py` | `/operacao` | monitor de viagens (fretamento) e viagens produtivas (urbano) | não | `_docs/operacao-urbano-fretamento.md` |
 | `sinotico.py` | `/sinotico` | painel sinótico do urbano (régua, colado/buraco) | não | `_docs/operacao-urbano-fretamento.md` |
 | `bus_lines.py` | `/bus-lines` | linhas, tabelas e cumprimento | não | `_docs/operacao-urbano-fretamento.md` |
