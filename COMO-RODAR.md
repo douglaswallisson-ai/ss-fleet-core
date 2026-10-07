@@ -42,7 +42,7 @@ Valores que precisam estar certos:
 
 | Variável | Valor |
 |---|---|
-| `DATABASE_URL` | `postgresql+asyncpg://USUARIO:SENHA@master-aurora-01-cluster.cluster-cljyswoojkdn.us-east-1.rds.amazonaws.com:5432/mova2` (usuário somente leitura, pedir ao TI) |
+| `DATABASE_URL` | `postgresql+asyncpg://<usuário>:<senha>@<endereço do banco>:5432/mova2` (usuário somente leitura; o TI passa os três) |
 | `REDIS_URL` | `redis://localhost:6379/0` |
 | `SECRET_KEY` | qualquer texto longo e aleatório (assina o login da plataforma nova; não precisa ser igual ao de outro computador) |
 | `CORS_ORIGINS` | `["http://localhost:8080"]` |
