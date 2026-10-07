@@ -1,3 +1,5 @@
+> ⚠️ **Para rodar a plataforma nova, siga o [COMO-RODAR.md](COMO-RODAR.md).** O passo a passo abaixo (Docker) é do projeto original e não funciona sem login na AWS.
+
 # Fleet Management Platform
 
 Backend Python completo para plataforma de rastreamento e gerenciamento de frotas, com suporte a dispositivos Virloc 6/8, telemetria em tempo real, relatórios avançados e API RESTful .
