@@ -254,3 +254,19 @@ def test_abastecimento_em_etapas_nao_e_suspeito():
     """UAO-0G30, 07/10/2026: 55 → 88 → 99% em 2 min (abastecimento gravado em etapas)."""
     v, h = veiculo(arla=99.0), hist(arla_n=500.0, arla_total=500.0, arla_med=60.0, arla_saltos=1.0, arla_subidas=3.0, arla_quedas=0.0)
     assert _suspeitos(v, h) == []
+
+
+def test_bateria_baixa_em_veiculo_parado_nao_e_defeito():
+    """RML-0F31, CECOTI 10/10/2026: 12 V, sem ligar o motor há dias; parado, a bateria descarrega."""
+    v = veiculo(voltage=11.9, rpm=0.0)
+    h = hist(v_lig_n=0.0, v_lig_med=None, v_desl_n=73.0, v_desl_med=11.9, dias_rodou_7d=0.0, horas_sem_motor=110.0)
+    a = [x for x in _alertas_do_veiculo(v, h) if x["chave"] == "bateria"]
+    assert len(a) == 1 and a[0]["titulo"] == "Bateria descarregando com o veículo parado"
+
+
+def test_bateria_baixa_rodando_todo_dia_e_bateria_fraca():
+    """RTR-8I02, CECOTI 10/10/2026: roda 6 dias por semana, alternador 28,6 V, parado 23,1 V há 9 semanas."""
+    v = veiculo(voltage=28.6, rpm=1500.0)
+    h = hist(v_lig_n=500.0, v_lig_med=28.6, v_desl_n=2000.0, v_desl_med=23.1, dias_rodou_7d=6.0, horas_sem_motor=1.0)
+    a = [x for x in _alertas_do_veiculo(v, h) if x["chave"] == "bateria"]
+    assert len(a) == 1 and a[0]["titulo"] == "Bateria não está segurando a carga"

@@ -218,6 +218,8 @@ ARLA_SALTOS_MAX = 3
 ARLA_SUBIDA_PONTOS = 10
 ARLA_SUBIDAS_MAX = 3
 TEMP_JANELA_MIN = 30
+# Sem ligar o motor há mais que isso, bateria baixa é descarga de veículo parado.
+BATERIA_PARADO_H = 48
 TEMP_MIN_LEITURAS = 3
 OLEO_TETO = 240  # kPa: perto do limite de 1 byte (255) — a partir daqui a leitura estoura
 
@@ -303,6 +305,26 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
     for r in temps:
         o = out.setdefault(r["unit_id"], {})
         o["temp_n"], o["temp_med"], o["temp_n_crit"] = float(r["n"]), float(r["med"]), float(r["n_crit"])
+    # Uso do veículo na semana: bateria baixa num veículo que ficou dias sem ligar o motor é descarga de veículo
+    # parado (rastreador e acessórios consumindo), não necessariamente bateria com defeito
+    # (RML-0F31, CECOTI, 10/10/2026: 12,6 → 11,7 V em 4 semanas parado e 6,7 V em setembro).
+    uso = await _ler(
+        """
+        SELECT d.unit_id, count(DISTINCT d.local_time::date) AS dias_rodou, max(d.local_time) AS ultimo_motor
+        FROM mova.dev_status_30 d
+        WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
+          AND d.local_time >= :desde AND d.can_rpm >= 500
+        GROUP BY d.unit_id
+        """,
+        {"g": group_id, "desde": datetime.now() - timedelta(days=7)},
+    )
+    agora = datetime.now()
+    for r in uso:
+        o = out.setdefault(r["unit_id"], {})
+        o["dias_rodou_7d"] = float(r["dias_rodou"])
+        o["horas_sem_motor"] = (agora - r["ultimo_motor"]).total_seconds() / 3600 if r["ultimo_motor"] else None
+    for o in out.values():
+        o.setdefault("dias_rodou_7d", 0.0)  # sem nenhuma leitura com motor ligado na semana = não rodou
     return out
 
 
@@ -414,11 +436,20 @@ def _alertas_brutos(v: dict, h: Optional[dict] = None) -> list[dict]:
         elif vd is not None and h.get("v_desl_n", 0) >= MIN_LEITURAS and vd < lim_repouso:
             # Bateria fraca não para o veículo (o alternador recarrega): atenção, não crítico.
             alt_ok = bool(vl and vl >= carga)
-            a.append({"chave": "bateria", "titulo": "Bateria não está segurando a carga", "nivel": "atencao", "valor": f"{vd:.1f} V parado",
-                      "detalhe": (f"Com o motor ligado o alternador carrega bem ({vl:.1f} V). " if alt_ok else "")
-                                 + f"Mas com o motor desligado a tensão fica em {vd:.1f} V (mediana das últimas 24 h). Num caminhão de {sist}, uma bateria boa fica acima de {aten:.1f} V parada; abaixo disso ela está com menos da metade da carga e pode falhar na partida."
-                                 + (" Por isso o desenho pode mostrar um número alto com o motor ligado e o alerta continuar valendo." if alt_ok else ""),
-                      "acao": "Testar a bateria na oficina. Se ela estiver boa, procurar algum equipamento puxando energia com o caminhão desligado."})
+            hs = h.get("horas_sem_motor")
+            dias7 = h.get("dias_rodou_7d")
+            parado = (dias7 is not None and dias7 <= 2) or (hs is not None and hs >= BATERIA_PARADO_H)
+            if parado:
+                dias = f"há {hs / 24:.0f} dias" if hs is not None and hs >= 48 else "quase a semana toda"
+                a.append({"chave": "bateria", "titulo": "Bateria descarregando com o veículo parado", "nivel": "atencao", "valor": f"{vd:.1f} V parado",
+                          "detalhe": f"O veículo está sem ligar o motor {dias} ({h.get('dias_rodou_7d') or 0:.0f} dia(s) rodando nos últimos 7). Parado, o rastreador e outros equipamentos consomem a bateria, que está em {vd:.1f} V; num veículo de {sist}, abaixo de {aten:.1f} V ela pode não dar partida. Isso não quer dizer que a bateria esteja com defeito.",
+                          "acao": "Ligar o motor por pelo menos 30 minutos ou carregar a bateria. Se o veículo costuma ficar parado muitos dias, desligar a chave geral. Se descarregar mesmo rodando todo dia, aí testar a bateria."})
+            else:
+                a.append({"chave": "bateria", "titulo": "Bateria não está segurando a carga", "nivel": "atencao", "valor": f"{vd:.1f} V parado",
+                          "detalhe": (f"Com o motor ligado o alternador carrega bem ({vl:.1f} V). " if alt_ok else "")
+                                     + f"Mas com o motor desligado a tensão fica em {vd:.1f} V (mediana das últimas 24 h). Num caminhão de {sist}, uma bateria boa fica acima de {aten:.1f} V parada; abaixo disso ela está com menos da metade da carga e pode falhar na partida."
+                                     + (" Por isso o desenho pode mostrar um número alto com o motor ligado e o alerta continuar valendo." if alt_ok else ""),
+                          "acao": "Testar cada bateria separadamente na oficina (nos veículos de 24 V são duas de 12 V; uma delas com um elemento ruim deixa a tensão parada em torno de 23 V). Se as duas estiverem boas, procurar algum equipamento puxando energia com o veículo desligado."})
     # ARLA: mediana de 24 h das leituras acima de 0 (0 o tempo todo = veículo sem sensor de ARLA).
     arla = h.get("arla_med")
     # Maioria acima de 100% = código de "sem informação" (TDP-2E24: 102% o dia todo e um 5% solto).
