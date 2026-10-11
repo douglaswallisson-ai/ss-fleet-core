@@ -27,6 +27,9 @@ from app.services.permission_cache import permission_cache
 
 logger = get_logger(__name__)
 
+LOGIN_MAX_FALHAS = 10  # senhas erradas seguidas por login antes de bloquear
+LOGIN_JANELA_S = 15 * 60
+
 router = APIRouter()
 
 
@@ -40,6 +43,20 @@ async def login(
 
     Authenticates user by login field and returns JWT access and refresh tokens.
     """
+    # Limite de tentativas (revisão de segurança 08/10/2026): sem ele, dava para
+    # testar senhas sem fim — e as senhas do sistema antigo são SHA1 sem sal.
+    # Conta só os erros, por login, numa janela de 15 minutos.
+    chave_tentativas = f"login_falhas:{credentials.login.strip().lower()}"
+    try:
+        falhas = int(await async_redis_client.get(chave_tentativas) or 0)
+    except Exception:
+        falhas = 0  # Redis fora não pode impedir o login
+    if falhas >= LOGIN_MAX_FALHAS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Muitas tentativas com senha errada. Aguarde 15 minutos e tente de novo.",
+        )
+
     # Get user by login (not email)
     # Note: Legacy table may have duplicate logins, get first active user with matching password
     result = await db.execute(
@@ -52,6 +69,11 @@ async def login(
 
     # Verify user exists and password is correct (SHA1 validation)
     if not user or not verify_password_sha1(credentials.password, user.password):
+        try:
+            if await async_redis_client.incr(chave_tentativas) == 1:
+                await async_redis_client.expire(chave_tentativas, LOGIN_JANELA_S)
+        except Exception as e:
+            logger.warning("login_limite_indisponivel", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password"
@@ -63,6 +85,11 @@ async def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is disabled"
         )
+
+    try:
+        await async_redis_client.delete(chave_tentativas)
+    except Exception:
+        pass
 
     # Create tokens
     access_token = create_access_token(subject=str(user.id))

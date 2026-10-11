@@ -119,6 +119,14 @@ class Settings(BaseSettings):
         default="",
         description="x-api-key do API Gateway Hikvision. Segredo: só no .env, nunca no código.",
     )
+    PERMITIR_GRAVACAO_PRODUCAO: bool = Field(
+        default=False,
+        description=(
+            "Libera as rotas herdadas que gravam no banco de produção (cadastro de veículo, "
+            "dispositivo, motorista, grupo, vínculos, reconhecimento de evento, permissões). "
+            "Desligado até a engenharia validar a gravação em produção (revisão de segurança 08/10/2026)."
+        ),
+    )
     SS_ADMIN_USER_IDS: str = Field(
         default="",
         description=(

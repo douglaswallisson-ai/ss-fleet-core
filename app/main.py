@@ -24,6 +24,47 @@ from app.api.v1.api import api_router
 setup_logging()
 logger = get_logger(__name__)
 
+# Revisão de segurança (08/10/2026): os valores padrão de SECRET_KEY e
+# SSO_SHARED_SECRET estão escritos no config.py, que é público. Com eles,
+# qualquer pessoa assina um token de login como qualquer usuário (inclusive
+# super admin da SS). Fora do ambiente de desenvolvimento o servidor não sobe
+# com esses valores; no desenvolvimento só avisa, para não travar quem testa.
+_SEGREDOS_PADRAO = {
+    "SECRET_KEY": "your-super-secret-key-change-this-in-production",
+    "SSO_SHARED_SECRET": "change-this-shared-secret-in-production",
+}
+_fracos = [
+    nome for nome, padrao in _SEGREDOS_PADRAO.items()
+    if getattr(settings, nome) == padrao or len(getattr(settings, nome)) < 32
+]
+if _fracos:
+    if settings.ENVIRONMENT != "development":
+        raise RuntimeError(
+            f"Defina no .env um valor longo e aleatório (32+ caracteres) para: {', '.join(_fracos)}."
+        )
+    logger.warning("segredo_padrao_em_uso", variaveis=_fracos)
+
+# Rotas herdadas que gravam no banco de produção. Nenhuma tela as usa hoje; até
+# a engenharia validar a gravação em produção, ficam bloqueadas por padrão
+# (PERMITIR_GRAVACAO_PRODUCAO no .env libera). As rotas novas gravam no
+# armazenamento provisório e não passam por aqui.
+_PREFIXOS_GRAVAM_PRODUCAO = tuple(
+    f"{settings.API_V1_PREFIX}/{p}"
+    for p in (
+        "groups", "subgroups", "vehicles", "devices", "drivers",
+        "device-associations", "video-device-associations", "admin/",
+    )
+)
+_METODOS_LEITURA = {"GET", "HEAD", "OPTIONS"}
+
+
+def _grava_em_producao(metodo: str, caminho: str) -> bool:
+    if metodo in _METODOS_LEITURA:
+        return False
+    if caminho.startswith(f"{settings.API_V1_PREFIX}/events/") and caminho.endswith("/acknowledge"):
+        return True
+    return caminho.startswith(_PREFIXOS_GRAVAM_PRODUCAO)
+
 # Initialize Sentry if DSN is configured
 if settings.SENTRY_DSN:
     sentry_sdk.init(
@@ -91,6 +132,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def bloquear_gravacao_producao(request, call_next):
+    if not settings.PERMITIR_GRAVACAO_PRODUCAO and _grava_em_producao(request.method, request.url.path):
+        logger.warning("gravacao_producao_bloqueada", metodo=request.method, caminho=request.url.path)
+        return JSONResponse(
+            status_code=403,
+            content={"detail": {"message": "Gravação no banco de produção desligada nesta versão da plataforma."}},
+        )
+    return await call_next(request)
+
 
 # Add monitoring middleware
 if settings.PROMETHEUS_ENABLED:
