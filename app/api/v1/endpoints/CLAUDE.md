@@ -35,6 +35,7 @@ Padrão de código: ver `../../../../CLAUDE.md` (raiz do projeto), seção 2.
 | `escala_viagem.py` | `/escala-viagem` | plano de viagem para a GR + conformidade | SQLite `escala_viagem` | `_docs/escala-e-roteirizacao.md` |
 | `roteirizacao.py` | `/roteirizacao` | km, tempo com pausas legais, combustível, pedágio; desvio de áreas de risco pelo motor (`app/core/roteador.py`) e `/rotograma` | não | `_docs/escala-e-roteirizacao.md` |
 | `areas_risco.py` | `/areas-risco` | áreas de risco (cercas com categoria 8/9, marcadas, desenhadas) e programação de viagens (veículo + rota + horário) para os avisos de desvio no CCO | provisório `data/rotas.sqlite` | `app/core/areas_risco.py` |
+| `comparativo.py` | `/comparativo` | comparativo com iguais: o cliente contra os outros do mesmo segmento (urbano, fretamento, carga, máquinas) em km/l, parado ligado, km sem motorista e uso da frota; outros clientes sem nome; eventos e velocidade só da própria frota | — | docstring do módulo |
 | `operacao.py` | `/operacao` | monitor de viagens (fretamento) e viagens produtivas (urbano) | não | `_docs/operacao-urbano-fretamento.md` |
 | `sinotico.py` | `/sinotico` | painel sinótico do urbano (régua, colado/buraco) | não | `_docs/operacao-urbano-fretamento.md` |
 | `bus_lines.py` | `/bus-lines` | linhas, tabelas e cumprimento | não | `_docs/operacao-urbano-fretamento.md` |

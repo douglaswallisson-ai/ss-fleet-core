@@ -5,7 +5,7 @@ Combines all endpoint routers.
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import fleet_health, positions, auth, vehicles, devices, tracked_unit_devices, vcms_unit_devices, drivers, driver_ranking, gerencial, bi, ai_fleet, relevo, operacao, escala_viagem, mapa, suporte, embed, acessos, sinotico, manutencao, timeline, jornada, combustivel, cliente, roteirizacao, cadastros, passageiros, relatorios_frota, reports, groups, subgroups, history_detailed, bus_lines, tracking, events, video, cameras, contratos, estoque, cco, manutencao_risco, indicators, pois, areas_risco
+from app.api.v1.endpoints import fleet_health, positions, auth, vehicles, devices, tracked_unit_devices, vcms_unit_devices, drivers, driver_ranking, gerencial, bi, ai_fleet, relevo, operacao, escala_viagem, mapa, suporte, embed, acessos, sinotico, manutencao, timeline, jornada, combustivel, cliente, roteirizacao, cadastros, passageiros, relatorios_frota, reports, groups, subgroups, history_detailed, bus_lines, tracking, events, video, cameras, contratos, estoque, cco, manutencao_risco, indicators, pois, areas_risco, comparativo
 from app.routers.admin import permissions_router, user_group_access_router
 
 api_router = APIRouter()
@@ -51,6 +51,7 @@ api_router.include_router(contratos.router, prefix="/contratos", tags=["Contrato
 api_router.include_router(estoque.router, prefix="/estoque", tags=["Estoque de equipamentos"])
 api_router.include_router(cco.router, prefix="/cco", tags=["Painel CCO"])
 api_router.include_router(areas_risco.router, prefix="/areas-risco", tags=["Áreas de risco e programação"])
+api_router.include_router(comparativo.router, prefix="/comparativo", tags=["Comparativo com iguais"])
 api_router.include_router(manutencao_risco.router, prefix="/manutencao-risco", tags=["Manutenção por risco"])
 api_router.include_router(indicators.router, prefix="/indicators", tags=["Indicators"])
 api_router.include_router(pois.router, prefix="/pois", tags=["POIs"])

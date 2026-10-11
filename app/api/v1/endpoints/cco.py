@@ -100,6 +100,21 @@ def tipo_icone(categoria_id: Optional[int]) -> str:
     return "caminhao"
 
 
+def local_do_endereco(endereco: Optional[str]) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """(cidade, estado, bairro) do endereço que o rastreador manda.
+
+    Formato em 10/10/2026: "Rua, Bairro - Cidade - Estado - Brasil" (2.735 de 2.754 veículos
+    ativos); os outros 19 vêm como "CIDADE - UF". Transporte urbano é por cidade (PM, 10/10/2026:
+    a Fênix opera em Florianópolis e São José)."""
+    partes = [p.strip() for p in (endereco or "").split(" - ") if p.strip()]
+    if len(partes) >= 3 and partes[-1].lower() == "brasil":
+        bairro = partes[-4].split(",")[-1].strip() if len(partes) >= 4 else None
+        return partes[-3], partes[-2], bairro or None
+    if len(partes) == 2 and len(partes[1]) == 2 and partes[1].isalpha():
+        return partes[0].title(), partes[1].upper(), None
+    return None, None, None
+
+
 def cor_do_carro(avisos_abertos: list[dict], ignicao: bool, velocidade: float) -> str:
     if any(a["gravidade"] == "critico" for a in avisos_abertos):
         return "vermelho"
@@ -324,7 +339,9 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
         recente = bool(lt) and (agora - lt) <= timedelta(minutes=POSICAO_RECENTE_MIN)
         vel = float(v["velocidade"] or 0) if ig and recente else 0.0
         meus = por_unidade.get(v["unit_id"], [])
+        cidade, uf, bairro = local_do_endereco(v["endereco"])
         veiculos.append({
+            "cidade": cidade, "uf": uf, "bairro": bairro,
             "id": v["unit_id"], "placa": v["placa"],
             "prefixo": v["prefixo"] if v["prefixo"] and len(v["prefixo"]) <= 10 else v["placa"],
             "descricao": v["prefixo"] if v["prefixo"] and len(v["prefixo"]) > 10 else None, "empresa": v["empresa"], "group_id": v["group_id"],

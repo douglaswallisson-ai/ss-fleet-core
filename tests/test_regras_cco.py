@@ -1,5 +1,6 @@
 """Regras do Painel CCO (endpoints/cco.py) — sem banco."""
 
+from app.api.v1.endpoints import cco
 from app.api.v1.endpoints.cco import cor_do_carro, gravidade_camera, tipo_icone
 
 
@@ -38,3 +39,12 @@ def test_excesso_e_aceleracao_so_criticos_a_partir_de_20():
 def test_furto_de_combustivel_fora_do_painel():
     from app.api.v1.endpoints.cco import EVENTOS
     assert 440 not in EVENTOS
+
+
+def test_cidade_do_endereco():
+    assert cco.local_do_endereco("Rodovia Virgílio Várzea, Papaquara - Florianópolis - Santa Catarina - Brasil") == (
+        "Florianópolis", "Santa Catarina", "Papaquara")
+    assert cco.local_do_endereco("Brumadinho - Minas Gerais - Brasil") == ("Brumadinho", "Minas Gerais", None)
+    assert cco.local_do_endereco("AGUANIL - MG") == ("Aguanil", "MG", None)
+    assert cco.local_do_endereco(None) == (None, None, None)
+    assert cco.local_do_endereco("-19.9, -43.9") == (None, None, None)
