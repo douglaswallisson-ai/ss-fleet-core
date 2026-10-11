@@ -38,6 +38,7 @@ from sqlalchemy import text
 from app.core import combustivel as plaus
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
+from app.core.periodo import com_limite
 
 router = APIRouter()
 
@@ -68,7 +69,7 @@ def _f(v):
 async def _ler(sql: str, p: dict) -> list[dict]:
     async with AsyncSessionLocalReplica() as db:
         await db.execute(text("SET LOCAL statement_timeout = '90s'"))
-        return [{k: _f(v) for k, v in r.items()} for r in (await db.execute(text(sql), p)).mappings().all()]
+        return [{k: _f(v) for k, v in r.items()} for r in (await db.execute(text(sql), com_limite(p))).mappings().all()]
 
 
 def _params(user, group_id: int, inicio: date, fim: date, max_dias: int, unit_id: Optional[int] = None) -> dict:
@@ -422,18 +423,18 @@ async def odometro_travado(group_id: int = Query(...), user=Depends(require_perm
     travados = await _ler("""SELECT d.unit_id, max(tu.label) AS placa, max(tu.label2) AS prefixo, min(d.odom) AS odometro_travado,
             count(*) AS leituras, max(d.speed) AS vel_max, max(d.local_time) AS ultima, max(d.odom_quality_flag) AS marcacao
         FROM mova.dev_status_30 d JOIN mova.tracked_unit tu ON tu.id = d.unit_id
-        WHERE tu.group_id = :g AND tu.status = 1 AND d.local_time >= now() - interval '24 hours'
+        WHERE tu.group_id = :g AND tu.status = 1 AND d.local_time >= :desde AND d.local_time < :ate_limite
         GROUP BY d.unit_id
         HAVING count(*) >= 30 AND count(DISTINCT d.odom) = 1 AND bool_and(coalesce(d.odom_quality_flag, '') <> 'ok') AND max(d.speed) > 20""",
-                             {"g": group_id})
+                             {"g": group_id, "desde": datetime.now() - timedelta(hours=24)})
     out = []
     for t in travados:
         u = t["unit_id"]
-        brutos = await _ler("""SELECT odom_raw FROM mova.dev_status_raw WHERE unit_id = :u AND local_time >= now() - interval '24 hours'
-                               ORDER BY local_time DESC LIMIT 5""", {"u": u})
+        brutos = await _ler("""SELECT odom_raw FROM mova.dev_status_raw WHERE unit_id = :u AND local_time >= :d
+                               ORDER BY local_time DESC LIMIT 5""", {"u": u, "d": datetime.now() - timedelta(hours=24)})
         if not t["odometro_travado"]:
-            ja_teve = await _ler("""SELECT 1 FROM mova.dev_status_raw WHERE unit_id = :u AND local_time >= now() - interval '30 days'
-                                    AND odom_raw > 0 LIMIT 1""", {"u": u})
+            ja_teve = await _ler("""SELECT 1 FROM mova.dev_status_raw WHERE unit_id = :u AND local_time >= :d
+                                    AND odom_raw > 0 LIMIT 1""", {"u": u, "d": datetime.now() - timedelta(days=30)})
             if not ja_teve:
                 continue  # sem sensor de odômetro: não é problema real
         vals = [float(b["odom_raw"] or 0) for b in reversed(brutos)]

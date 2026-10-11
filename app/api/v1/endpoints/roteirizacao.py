@@ -43,6 +43,7 @@ from sqlalchemy import text
 from app.core import areas_risco, combustivel, geo, roteador
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
+from app.core.periodo import com_limite
 
 router = APIRouter()
 
@@ -203,7 +204,7 @@ def _dist_ponto_segmento_m(lat, lon, a, b) -> float:
 
 async def _ler(sql: str, p: dict):
     async with AsyncSessionLocalReplica() as db:
-        return (await db.execute(text(sql), p)).mappings().all()
+        return (await db.execute(text(sql), com_limite(p))).mappings().all()
 
 
 async def _consumo(g: int, unit_id: Optional[int], operacao: str) -> tuple[float, str]:
@@ -473,7 +474,7 @@ async def rotograma(p: Pedido, user=Depends(require_permission("reports", "read"
             FROM mova.dev_status_30 d
             WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
               AND d.unit_id NOT IN (SELECT unit_id FROM suspeitos)
-              AND d.local_time >= :desde AND d.tracker_event_id = ANY(CAST(:cods AS int[]))
+              AND d.local_time >= :desde AND d.local_time < :ate_limite AND d.tracker_event_id = ANY(CAST(:cods AS int[]))
               AND d.latitude BETWEEN :b0 AND :b1 AND d.longitude BETWEEN :o0 AND :o1
               AND ST_DWithin(ST_SetSRID(ST_MakePoint(d.longitude, d.latitude), 4326)::geography,
                              ST_GeomFromText(:wkt, 4326)::geography, :raio))

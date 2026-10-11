@@ -89,3 +89,63 @@ def categoria_sql() -> str:
         f" WHEN h.alarm_source IN ({', '.join(map(str, SOURCES_ADAS))}) THEN 'adas'"
         " ELSE 'outro' END"
     )
+
+
+# ------------------------------------------------------------ partes diárias
+#
+# `vcms.vcms_history` é dividida por dia no modelo antigo (herança, uma tabela
+# `vcms_history_pAAAAMMDD` por dia de `local_time`, sem CHECK de data). Sem a
+# regra, o banco não sabe que dia está em cada parte e abre TODAS — 879 em
+# 11/10/2026, inclusive dias até 2099 — a cada consulta: a dos avisos de câmera
+# do CCO (2 h, a cada 30 s) estourava o tempo limite do banco. Conferido em
+# 11/10/2026 que cada parte guarda só o seu dia (p20261010: 00:01 a 23:56).
+# Então as consultas leem direto as partes do período.
+
+import time as _time
+from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
+
+_PARTES: dict[str, object] = {}
+_PARTES_S = 3600
+#: Período longo demais vira a tabela inteira (mesmo comportamento de antes).
+DIAS_MAX_PARTES = 400
+
+
+async def _catalogo() -> tuple[set[str], list[str]]:
+    hit = _PARTES.get("c")
+    if hit and _time.time() - hit[0] < _PARTES_S:  # type: ignore[index]
+        return hit[1], hit[2]  # type: ignore[index]
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocalReplica
+    async with AsyncSessionLocalReplica() as db:
+        nomes = {r[0] for r in (await db.execute(text(
+            "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid "
+            "WHERE i.inhparent = 'vcms.vcms_history'::regclass"))).all()}
+        colunas = [r[0] for r in (await db.execute(text(
+            "SELECT attname FROM pg_attribute WHERE attrelid = 'vcms.vcms_history'::regclass "
+            "AND attnum > 0 AND NOT attisdropped ORDER BY attnum"))).all()]
+    _PARTES["c"] = (_time.time(), nomes, colunas)
+    return nomes, colunas
+
+
+def montar_fonte(ini: _date, fim: _date, existentes: set[str], colunas: list[str]) -> str:
+    """Subconsulta com as partes dos dias de `ini` a `fim` (inclusive), para usar como `FROM {fonte} h`."""
+    if (fim - ini).days > DIAS_MAX_PARTES or not colunas:
+        return "vcms.vcms_history"
+    cols = ", ".join(f'"{c}"' for c in colunas)
+    # A mãe fica junto (está vazia; é barata) para não perder linha gravada fora de uma parte.
+    partes = [f"SELECT {cols} FROM ONLY vcms.vcms_history"]
+    d = ini
+    while d <= fim:
+        nome = f"vcms_history_p{d:%Y%m%d}"
+        if nome in existentes:
+            partes.append(f"SELECT {cols} FROM vcms.{nome}")
+        d += _timedelta(days=1)
+    return "(" + " UNION ALL ".join(partes) + ")"
+
+
+async def fonte_historico(ini, fim=None) -> str:
+    """`FROM` de `vcms_history` só com as partes do período (ini/fim datetime ou date)."""
+    a = ini.date() if isinstance(ini, _datetime) else ini
+    b = (fim.date() if isinstance(fim, _datetime) else fim) if fim else _date.today()
+    existentes, colunas = await _catalogo()
+    return montar_fonte(a, b, existentes, colunas)

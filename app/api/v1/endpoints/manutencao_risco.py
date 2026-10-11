@@ -33,6 +33,7 @@ from app.core import camera as cam
 from app.core import combustivel as plaus
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
+from app.core.periodo import com_limite
 
 router = APIRouter()
 
@@ -51,7 +52,7 @@ PESO = {"critico": 30, "atencao": 12, "vencido": 15, "vencendo": 5, "tendencia":
 async def _ler(sql: str, p: dict) -> list[dict]:
     async with AsyncSessionLocalReplica() as db:
         await db.execute(text("SET LOCAL statement_timeout = '90s'"))
-        return [dict(r) for r in (await db.execute(text(sql), p)).mappings().all()]
+        return [dict(r) for r in (await db.execute(text(sql), com_limite(p))).mappings().all()]
 
 
 def inclinacao(pontos: list[tuple[float, float]]) -> Optional[float]:
@@ -160,7 +161,7 @@ s AS (
            avg(d.can_engine_coolant_temp) FILTER (WHERE d.ignition AND coalesce(d.can_rpm, d.rpm) > 600
                                                   AND d.can_engine_coolant_temp BETWEEN 40 AND 130) AS temp_media
     FROM mova.dev_status_30 d
-    WHERE d.unit_id IN (SELECT id FROM un) AND d.local_time >= :ini
+    WHERE d.unit_id IN (SELECT id FROM un) AND d.local_time >= :ini AND d.local_time < :ate_limite
     GROUP BY 1, 2),
 c AS (
     SELECT h.unit_id, h.dt::date AS dia, sum({litros}) / 1000.0 AS litros, sum({km_comb}) / 1000.0 AS km_comb
@@ -262,7 +263,7 @@ async def causa_raiz(unit_id: int, ate: Optional[date] = Query(None), dias: int 
     # Nome do tipo pela chave (type, modelo, source): pelo id sozinho ADAS vira DMS (app/core/camera.py).
     camera = await _ler(f"""
         SELECT h.local_time::date AS dia, {cam.NOME_SQL} AS evento, count(*) AS n
-        FROM vcms.vcms_history h {cam.JOIN_TIPO}
+        FROM {await cam.fonte_historico(ini, fim)} h {cam.JOIN_TIPO}
         WHERE h.unit_id = :u AND h.local_time >= :ini AND h.local_time < :fim GROUP BY 1, 2""", p)
     alarmes = await _ler("""
         SELECT av.initial_time::date AS dia, a.name AS evento, count(*) AS n

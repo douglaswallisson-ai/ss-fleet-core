@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.camera import JOIN_TIPO, NOME_SQL, categoria_sql, severidade_video, tipo_video
+from app.core.camera import JOIN_TIPO, NOME_SQL, categoria_sql, fonte_historico, severidade_video, tipo_video
 from app.core.database import get_db_read
 from app.core.logging import get_logger
 from app.middleware.auth import require_permission
@@ -169,7 +169,7 @@ async def list_video_occurrences(
                 h.user_verified AS acknowledged_by, h.date_verified AS acknowledged_at,
                 h.images, h.videos,
                 tu.label AS vehicle_label, tu.label2 AS vehicle_prefix
-            FROM vcms.vcms_history h
+            FROM {await fonte_historico(start_date, end_date)} h
             {JOIN_TIPO}
             JOIN mova.tracked_unit tu ON tu.id = h.unit_id
             WHERE h.local_time >= :start AND h.local_time <= :end{filtro_veiculo}{escopo_sql_oc}

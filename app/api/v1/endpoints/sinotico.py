@@ -33,7 +33,7 @@ Todos os horários são hora local (as três tabelas gravam em hora de Brasília
 
 import math
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -41,6 +41,7 @@ from sqlalchemy import text
 
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
+from app.core.periodo import com_limite
 
 router = APIRouter()
 
@@ -64,7 +65,7 @@ def _guardar(chave: tuple, valor):
 
 async def _ler(sql: str, p: dict):
     async with AsyncSessionLocalReplica() as db:
-        return (await db.execute(text(sql), p)).mappings().all()
+        return (await db.execute(text(sql), com_limite(p))).mappings().all()
 
 
 def _grupo_permitido(user, group_id: int):
@@ -137,15 +138,17 @@ async def linhas(group_id: int = Query(...), user=Depends(require_permission("re
         WITH ult AS (
           SELECT DISTINCT ON (ct.unit_id) ct.unit_id, ct.line_number, ct.trip_status, ct.start_time
           FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id
-          WHERE tu.group_id = :g AND ct.start_time >= now() - interval '3 hours'
+          WHERE tu.group_id = :g AND ct.start_time >= :desde_3h AND ct.start_time < :ate_limite
           ORDER BY ct.unit_id, ct.start_time DESC)
         SELECT line_number::text AS linha,
-               count(*) FILTER (WHERE trip_status AND start_time >= now() - interval '{JANELA_ATIVO_MIN} minutes') AS agora,
+               count(*) FILTER (WHERE trip_status AND start_time >= :desde_ativo AND start_time < :ate_limite) AS agora,
                count(*) AS carros_3h
         FROM ult WHERE line_number IS NOT NULL AND line_number > 0
         GROUP BY 1 ORDER BY 2 DESC, 3 DESC
         """,
-        {"g": group_id},
+        # Horários calculados aqui: `now() - interval` faz o banco abrir todas as partes diárias de con_telemetry.
+        {"g": group_id, "desde_3h": datetime.now() - timedelta(hours=3),
+         "desde_ativo": datetime.now() - timedelta(minutes=JANELA_ATIVO_MIN)},
     )
     return _guardar(("linhas", group_id), [dict(r) for r in rows])
 
@@ -161,12 +164,12 @@ async def _referencia(group_id: int, linha: str, sentido: int) -> Optional[dict]
                min(ct.start_time) AS ini, max(ct.end_time) AS fim, count(*) AS trechos
         FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id
         WHERE tu.group_id = :g AND ct.line_number = :l AND ct.trip_direction = :s AND ct.trip_status = true
-          AND ct.start_time >= current_date - 1 AND ct.end_time IS NOT NULL
+          AND ct.start_time >= :ontem AND ct.start_time < :ate_limite AND ct.end_time IS NOT NULL
         GROUP BY 1, 2, 3
         HAVING max(ct.end_time) - min(ct.start_time) BETWEEN interval '10 minutes' AND interval '3 hours'
         ORDER BY count(*) DESC, max(ct.end_time) DESC LIMIT 5
         """,
-        {"g": group_id, "l": int(linha), "s": sentido},
+        {"g": group_id, "l": int(linha), "s": sentido, "ontem": datetime.combine(date.today() - timedelta(days=1), datetime.min.time())},
     )
     for v in viagens:
         pos = await _ler(
@@ -245,7 +248,7 @@ async def sinotico(
           SELECT DISTINCT ON (ct.unit_id) ct.unit_id, ct.line_number, ct.trip_direction, ct.trip_number,
                  ct.trip_status, ct.start_time
           FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id
-          WHERE tu.group_id = :g AND ct.start_time >= now() - interval '{JANELA_ATIVO_MIN} minutes'
+          WHERE tu.group_id = :g AND ct.start_time >= :desde_ativo AND ct.start_time < :ate_limite
           ORDER BY ct.unit_id, ct.start_time DESC)
         SELECT u.unit_id, u.trip_direction AS sentido, u.trip_number AS viagem, u.start_time,
                tu.label AS placa, tu.label2 AS prefixo,
@@ -255,7 +258,7 @@ async def sinotico(
         LEFT JOIN mova.dev_status ds ON ds.unit_id = u.unit_id
         WHERE u.line_number = :l AND u.trip_status = true
         """,
-        {"g": group_id, "l": int(linha)},
+        {"g": group_id, "l": int(linha), "desde_ativo": datetime.now() - timedelta(minutes=JANELA_ATIVO_MIN)},
     )
 
     sentidos = []

@@ -27,6 +27,7 @@ from app.core.logging import get_logger
 from app.middleware.auth import require_permission
 from app.core.escopo import clausula_escopo, escopo_do_usuario
 from app.schemas.pois import PoiResponse, PoiVisitResponse
+from app.core.periodo import ate_limite
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -53,7 +54,7 @@ async def list_pois(
     desde = datetime.now() - timedelta(days=days)
 
     filtro_nome = " AND nome ILIKE :search" if search else ""
-    params: dict = {"desde": desde, **escopo_params}
+    params: dict = {"desde": desde, "ate_limite": ate_limite(), **escopo_params}
     if search:
         params["search"] = f"%{search}%"
 
@@ -66,22 +67,22 @@ async def list_pois(
                            'poi' AS tipo, start_lat AS lat, start_lon AS lon
                     FROM mova.con_telemetry t
                     JOIN mova.tracked_unit tu ON tu.id = t.unit_id
-                    WHERE t.start_time >= :desde AND t.start_poi_id IS NOT NULL{escopo_sql}
+                    WHERE t.start_time >= :desde AND t.start_time < :ate_limite AND t.start_poi_id IS NOT NULL{escopo_sql}
                     UNION ALL
                     SELECT t.end_poi_id, end_poi_name, 'poi', end_lat, end_lon
                     FROM mova.con_telemetry t
                     JOIN mova.tracked_unit tu ON tu.id = t.unit_id
-                    WHERE t.start_time >= :desde AND t.end_poi_id IS NOT NULL{escopo_sql}
+                    WHERE t.start_time >= :desde AND t.start_time < :ate_limite AND t.end_poi_id IS NOT NULL{escopo_sql}
                     UNION ALL
                     SELECT t.start_area_id, start_area_name, 'area', start_lat, start_lon
                     FROM mova.con_telemetry t
                     JOIN mova.tracked_unit tu ON tu.id = t.unit_id
-                    WHERE t.start_time >= :desde AND t.start_area_id IS NOT NULL{escopo_sql}
+                    WHERE t.start_time >= :desde AND t.start_time < :ate_limite AND t.start_area_id IS NOT NULL{escopo_sql}
                     UNION ALL
                     SELECT t.end_area_id, end_area_name, 'area', end_lat, end_lon
                     FROM mova.con_telemetry t
                     JOIN mova.tracked_unit tu ON tu.id = t.unit_id
-                    WHERE t.start_time >= :desde AND t.end_area_id IS NOT NULL{escopo_sql}
+                    WHERE t.start_time >= :desde AND t.start_time < :ate_limite AND t.end_area_id IS NOT NULL{escopo_sql}
                 )
                 SELECT
                     poi_id, nome, tipo,
@@ -145,19 +146,19 @@ async def list_poi_visits(
                     t.start_poi_distance AS distance_m
                 FROM mova.con_telemetry t
                 JOIN mova.tracked_unit tu ON tu.id = t.unit_id
-                WHERE t.start_poi_id = :poi_id AND t.start_time >= :desde
+                WHERE t.start_poi_id = :poi_id AND t.start_time >= :desde AND t.start_time < :ate_limite
                 UNION ALL
                 SELECT
                     t.trip_id, t.unit_id, tu.label, tu.label2, t.driver_name,
                     t.end_time, 'saida', t.end_poi_distance
                 FROM mova.con_telemetry t
                 JOIN mova.tracked_unit tu ON tu.id = t.unit_id
-                WHERE t.end_poi_id = :poi_id AND t.start_time >= :desde
+                WHERE t.end_poi_id = :poi_id AND t.start_time >= :desde AND t.start_time < :ate_limite
                 ORDER BY moment DESC
                 LIMIT :limit
                 """
             ),
-            {"poi_id": poi_id, "desde": desde, "limit": limit},
+            {"poi_id": poi_id, "desde": desde, "ate_limite": ate_limite(), "limit": limit},
         )
     ).mappings().all()
 

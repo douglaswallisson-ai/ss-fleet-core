@@ -41,6 +41,7 @@ import json
 import re
 import sqlite3
 import threading
+import time as _relogio
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal, Optional
@@ -52,6 +53,7 @@ from sqlalchemy import text
 from app.core.database import AsyncSessionLocalReplica
 from app.core.odometro import horimetro_h, odometro_km
 from app.middleware.auth import require_permission
+from app.core.periodo import com_limite
 
 router = APIRouter()
 
@@ -151,7 +153,7 @@ def _grupo_ok(user, group_id: int):
 
 async def _ler(sql: str, p: dict):
     async with AsyncSessionLocalReplica() as db:
-        return (await db.execute(text(sql), p)).mappings().all()
+        return (await db.execute(text(sql), com_limite(p))).mappings().all()
 
 
 async def _frota(group_id: int) -> list[dict]:
@@ -224,7 +226,25 @@ TEMP_MIN_LEITURAS = 3
 OLEO_TETO = 240  # kPa: perto do limite de 1 byte (255) — a partir daqui a leitura estoura
 
 
+#: Leitura de 24 h e 7 dias da frota guardada por 10 min, para o painel de manutenção (atualiza a cada 2 min)
+#: e o CCO (a cada 5 min). Na Fênix, em 11/10/2026, eram 8 s de trabalho do banco a cada chamada.
+HIST_CACHE_S = 600
+_HIST_CACHE: dict[int, tuple[float, dict]] = {}
+
+
 async def _historico_24h(group_id: int) -> dict[int, dict]:
+    hit = _HIST_CACHE.get(group_id)
+    if hit and _relogio.time() - hit[0] < HIST_CACHE_S:
+        return hit[1]
+    out = await _historico_24h_banco(group_id)
+    _HIST_CACHE[group_id] = (_relogio.time(), out)
+    return out
+
+
+async def _historico_24h_banco(group_id: int) -> dict[int, dict]:
+    # Horário calculado aqui, nunca `now() - interval` no SQL: as tabelas são divididas por dia e só com a data
+    # pronta o banco abre as partes certas (11/10/2026: 40 s com now(), 0,02 s com a data pronta).
+    desde_24h = datetime.now() - timedelta(hours=24)
     rows = await _ler(
         """
         SELECT d.unit_id,
@@ -249,26 +269,28 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
                percentile_cont(0.5) WITHIN GROUP (ORDER BY d.can_def_level_percent) FILTER (WHERE d.can_def_level_percent BETWEEN 1 AND 100) AS arla_med
         FROM mova.dev_status_30 d
         WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
-          AND d.local_time >= now() - interval '24 hours'
+          AND d.local_time >= :desde AND d.local_time < :ate_limite
         GROUP BY d.unit_id
         """,
-        {"g": group_id},
+        {"g": group_id, "desde": desde_24h},
     )
     out = {r["unit_id"]: {k: (float(v) if v is not None else None) for k, v in dict(r).items() if k != "unit_id"} for r in rows}
     # Teto da escala do óleo em 7 dias: quem chega a ~255 kPa estoura e volta do
     # zero, e aí leitura baixa não se distingue de alta (RCA: o mesmo caminhão
     # em marcha lenta quente com ~30 kPa num dia e ~200 kPa no outro).
-    tetos = await _ler(
+    # Uma passada só pelos 7 dias serve ao teto do óleo e ao uso do veículo (abaixo).
+    semana = await _ler(
         """
-        SELECT d.unit_id, max(d.can_engine_oil_pressure) AS oleo_max_7d
+        SELECT d.unit_id, max(d.can_engine_oil_pressure) FILTER (WHERE d.can_rpm >= 600) AS oleo_max_7d,
+               count(DISTINCT d.local_time::date) AS dias_rodou, max(d.local_time) AS ultimo_motor
         FROM mova.dev_status_30 d
         WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
-          AND d.local_time >= now() - interval '7 days' AND d.can_rpm >= 600
+          AND d.local_time >= :desde AND d.local_time < :ate_limite AND d.can_rpm >= 500
         GROUP BY d.unit_id
         """,
-        {"g": group_id},
+        {"g": group_id, "desde": datetime.now() - timedelta(days=7)},
     )
-    for r in tetos:
+    for r in semana:
         out.setdefault(r["unit_id"], {})["oleo_max_7d"] = float(r["oleo_max_7d"]) if r["oleo_max_7d"] is not None else None
     saltos = await _ler(
         """
@@ -279,11 +301,11 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
                      lag(d.can_def_level_percent) OVER (PARTITION BY d.unit_id ORDER BY d.local_time) AS ant
               FROM mova.dev_status_30 d
               WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
-                AND d.local_time >= now() - interval '24 hours'
+                AND d.local_time >= :desde AND d.local_time < :ate_limite
                 AND d.can_def_level_percent BETWEEN 0 AND 100) x
         GROUP BY x.unit_id
         """,
-        {"g": group_id, "pts": ARLA_SALTO_PONTOS, "sub": ARLA_SUBIDA_PONTOS},
+        {"g": group_id, "pts": ARLA_SALTO_PONTOS, "sub": ARLA_SUBIDA_PONTOS, "desde": desde_24h},
     )
     for r in saltos:
         out.setdefault(r["unit_id"], {})["arla_saltos"] = float(r["arla_saltos"] or 0)
@@ -297,7 +319,7 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
                count(*) FILTER (WHERE d.can_engine_coolant_temp >= :crit) AS n_crit
         FROM mova.dev_status_30 d
         WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
-          AND d.local_time >= :desde AND d.can_rpm >= 500 AND d.can_engine_coolant_temp BETWEEN 1 AND 150
+          AND d.local_time >= :desde AND d.local_time < :ate_limite AND d.can_rpm >= 500 AND d.can_engine_coolant_temp BETWEEN 1 AND 150
         GROUP BY d.unit_id
         """,
         {"g": group_id, "desde": datetime.now() - timedelta(minutes=TEMP_JANELA_MIN), "crit": LIMITES["temp_critico"]},
@@ -308,18 +330,8 @@ async def _historico_24h(group_id: int) -> dict[int, dict]:
     # Uso do veículo na semana: bateria baixa num veículo que ficou dias sem ligar o motor é descarga de veículo
     # parado (rastreador e acessórios consumindo), não necessariamente bateria com defeito
     # (RML-0F31, CECOTI, 10/10/2026: 12,6 → 11,7 V em 4 semanas parado e 6,7 V em setembro).
-    uso = await _ler(
-        """
-        SELECT d.unit_id, count(DISTINCT d.local_time::date) AS dias_rodou, max(d.local_time) AS ultimo_motor
-        FROM mova.dev_status_30 d
-        WHERE d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1)
-          AND d.local_time >= :desde AND d.can_rpm >= 500
-        GROUP BY d.unit_id
-        """,
-        {"g": group_id, "desde": datetime.now() - timedelta(days=7)},
-    )
     agora = datetime.now()
-    for r in uso:
+    for r in semana:
         o = out.setdefault(r["unit_id"], {})
         o["dias_rodou_7d"] = float(r["dias_rodou"])
         o["horas_sem_motor"] = (agora - r["ultimo_motor"]).total_seconds() / 3600 if r["ultimo_motor"] else None

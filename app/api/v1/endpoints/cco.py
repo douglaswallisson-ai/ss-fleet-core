@@ -41,10 +41,11 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.api.v1.endpoints import manutencao as man
-from app.core.camera import JOIN_TIPO, NOME_SQL, gravidade_camera
+from app.core.camera import JOIN_TIPO, NOME_SQL, fonte_historico, gravidade_camera
 from app.core import areas_risco, geo
 from app.core.database import AsyncSessionLocalReplica
 from app.middleware.auth import require_permission
+from app.core.periodo import com_limite
 
 router = APIRouter()
 
@@ -180,7 +181,7 @@ SQL_EVENTOS = """
 SELECT d.unit_id, d.tracker_event_id AS cod, count(*) AS n, max(d.local_time) AS ultimo, min(d.local_time) AS primeiro,
        max(d.speed) AS vel_max
 FROM mova.dev_status_30 d
-WHERE d.local_time >= :desde AND d.tracker_event_id = ANY(CAST(:codigos AS int[]))
+WHERE d.local_time >= :desde AND d.local_time < :ate_limite AND d.tracker_event_id = ANY(CAST(:codigos AS int[]))
   AND d.unit_id IN (SELECT id FROM mova.tracked_unit WHERE status = 1 {filtro})
 GROUP BY 1, 2
 """
@@ -188,7 +189,7 @@ GROUP BY 1, 2
 SQL_CAMERA = """
 SELECT h.unit_id, {nome} AS nome, count(*) AS n,
        max(h.local_time) AS ultimo, max(h.speed) AS vel_max
-FROM vcms.vcms_history h {join_tipo}
+FROM {fonte} h {join_tipo}
 WHERE h.local_time >= :desde AND h.unit_id IN (SELECT id FROM mova.tracked_unit WHERE status = 1 {filtro})
 GROUP BY 1, 2
 """
@@ -207,7 +208,7 @@ WITH agora AS (
 -- (31222, 06/10/2026: desligado das 19:44 às 20:23 aparecia como "parado ligado há 38 min").
 , h AS (
     SELECT d.unit_id, d.local_time, (d.speed > 3 OR NOT d.ignition) AS quebra, coalesce(nullif(d.can_rpm, 0), d.rpm, 0) AS rpm
-    FROM mova.dev_status_30 d WHERE d.local_time >= :pl_desde AND d.unit_id IN (SELECT unit_id FROM agora))
+    FROM mova.dev_status_30 d WHERE d.local_time >= :pl_desde AND d.local_time < :ate_limite AND d.unit_id IN (SELECT unit_id FROM agora))
 , q AS (SELECT unit_id, max(local_time) FILTER (WHERE quebra) AS q FROM h GROUP BY 1)
 SELECT a.unit_id, a.local_time,
        coalesce(min(h.local_time) FILTER (WHERE NOT h.quebra AND (q.q IS NULL OR h.local_time > q.q)), a.local_time) AS desde,
@@ -235,7 +236,7 @@ def _filtro(grupos: Optional[list[int]], alias: str = "") -> str:
 async def _ler(sql: str, p: dict) -> list[dict]:
     async with AsyncSessionLocalReplica() as db:
         await db.execute(text("SET LOCAL statement_timeout = '60s'"))
-        return [dict(r) for r in (await db.execute(text(sql), p)).mappings().all()]
+        return [dict(r) for r in (await db.execute(text(sql), com_limite(p))).mappings().all()]
 
 
 async def _manutencao(grupo: int) -> list[dict]:
@@ -271,7 +272,7 @@ async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANEL
         p = {"grupos": grupos or [], "desde": desde, "codigos": list(EVENTOS)}
         veics = await _ler(SQL_VEICULOS.format(filtro=_filtro(grupos, "tu.")), p)
         evs = await _ler(SQL_EVENTOS.format(filtro=_filtro(grupos)), p)
-        cams = await _ler(SQL_CAMERA.format(filtro=_filtro(grupos), nome=NOME_SQL, join_tipo=JOIN_TIPO), p)
+        cams = await _ler(SQL_CAMERA.format(filtro=_filtro(grupos), nome=NOME_SQL, join_tipo=JOIN_TIPO, fonte=await fonte_historico(desde)), p)
         alrs = await _ler(SQL_ALARMES.format(filtro=_filtro(grupos)), p)
         plig = await _ler(SQL_PARADO_LIGADO.format(filtro=_filtro(grupos, "tu.")), {**p, "pl_desde": datetime.now() - timedelta(hours=3)})
         manut = await _manutencao(grupos[0]) if grupos and len(grupos) == 1 else []
@@ -397,7 +398,7 @@ async def _avisos_de_rota(veics: list[dict], grupos: Optional[list[int]], agora:
     # Os rastreadores mandam posição a cada ~2 min andando e menos parados: a janela cobre folgado.
     janela = max(max(p["desvio_min"] * 2 + 4, p["parada_max_min"] + 30) for p in progs)
     leit = await _ler("""SELECT unit_id, local_time, latitude::float AS lat, longitude::float AS lng, coalesce(speed, 0) AS vel
-                         FROM mova.dev_status_30 WHERE unit_id = ANY(CAST(:u AS int[])) AND local_time >= :d
+                         FROM mova.dev_status_30 WHERE unit_id = ANY(CAST(:u AS int[])) AND local_time >= :d AND local_time < :ate_limite
                            AND latitude IS NOT NULL AND latitude <> 0 ORDER BY local_time""",
                       {"u": [p["unit_id"] for p in progs], "d": agora - timedelta(minutes=janela)})
     por_u: dict[int, list[dict]] = {}
@@ -452,7 +453,7 @@ async def veiculo(unit_id: int, user=Depends(require_permission("reports", "read
         raise HTTPException(404, "Veículo não encontrado.")
     _grupos_do_usuario(user, rows[0]["group_id"])
     leit = await _ler("""SELECT local_time, can_total_used_fuel AS f FROM mova.dev_status_30
-                         WHERE unit_id = :u AND local_time >= :d AND can_total_used_fuel > 0 ORDER BY local_time""",
+                         WHERE unit_id = :u AND local_time >= :d AND local_time < :ate_limite AND can_total_used_fuel > 0 ORDER BY local_time""",
                       {"u": unit_id, "d": datetime.now() - timedelta(minutes=40)})
     consumo, minutos = None, None
     if len(leit) >= 2:

@@ -102,7 +102,7 @@ SELECT g.id AS group_id, g.name,
        (SELECT count(*) FROM mova.tracked_unit t WHERE t.group_id = g.id AND t.status = 1 AND t.unit_category_id = ANY(:maq)) AS maquinas,
        (SELECT count(*) FROM mova.tracked_unit t WHERE t.group_id = g.id AND t.status = 1) AS ativos,
        g.id IN (SELECT DISTINCT tu.group_id FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id
-                WHERE ct.start_time > :desde_linha AND ct.line_number > 0) AS urbano
+                WHERE ct.start_time > :desde_linha AND ct.start_time < :ate_limite AND ct.line_number > 0) AS urbano
 FROM mova."group" g WHERE g.id = ANY(:grupos)
 """
 
@@ -196,7 +196,7 @@ async def _base(ini: date, fim: date) -> dict:
         segs = {r["group_id"]: dict(r) for r in (await db.execute(text(SQL_SEGMENTO), {
             "grupos": elegiveis, "cats": list(cliente.CATEGORIAS_ONIBUS), "maq": list(CATEGORIAS_MAQUINA),
             # Linhas no mesmo período do comparativo (a JTP rodou 34 linhas em 30 dias e nenhuma nos últimos 15).
-            "desde_linha": ini})).mappings()}
+            "desde_linha": ini, "ate_limite": fim + timedelta(days=1)})).mappings()}
     d = {"kms": kms, "ocs": ocs, "elegiveis": elegiveis, "segs": segs}
     _CACHE[chave] = (time.time(), d)
     return d

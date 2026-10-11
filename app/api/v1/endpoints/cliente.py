@@ -14,6 +14,7 @@ no armazenamento provisório `data/cliente.sqlite`.
 """
 
 import json
+from datetime import datetime, timedelta
 import sqlite3
 import threading
 import time
@@ -60,7 +61,8 @@ async def _inferir(g: int) -> dict:
             "FROM mova.tracked_unit WHERE group_id = :g AND status = 1"), {"g": g, "cats": list(CATEGORIAS_ONIBUS)})).mappings().first()
         linhas = (await db.execute(text(
             "SELECT count(DISTINCT ct.line_number) FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id "
-            "WHERE tu.group_id = :g AND ct.start_time > now() - interval '15 days' AND ct.line_number > 0"), {"g": g})).scalar() or 0
+            "WHERE tu.group_id = :g AND ct.start_time > :desde AND ct.line_number > 0"),
+            {"g": g, "desde": datetime.now() - timedelta(days=15)})).scalar() or 0
     urbano = linhas > 0
     d = {"frota": True, "urbano": urbano, "fretamento": (v["onibus"] or 0) >= 5 and not urbano,
          "base": {"veiculos": v["n"], "onibus": v["onibus"], "linhas_rodando_15d": linhas}}
