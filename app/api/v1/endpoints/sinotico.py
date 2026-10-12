@@ -235,14 +235,8 @@ async def _referencia(group_id: int, linha: str, sentido: int) -> Optional[dict]
     return _guardar(chave, None)
 
 
-@router.get("")
-async def sinotico(
-    group_id: int = Query(...),
-    linha: str = Query(..., pattern=r"^\d{1,6}$"),
-    user=Depends(require_permission("reports", "read")),
-):
-    _grupo_permitido(user, group_id)
-    ultimos = await _ler(
+async def _ultimos_banco(group_id: int):
+    return await _ler(
         f"""
         WITH ult AS (
           SELECT DISTINCT ON (ct.unit_id) ct.unit_id, ct.line_number, ct.trip_direction, ct.trip_number,
@@ -250,16 +244,36 @@ async def sinotico(
           FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id
           WHERE tu.group_id = :g AND ct.start_time >= :desde_ativo AND ct.start_time < :ate_limite
           ORDER BY ct.unit_id, ct.start_time DESC)
-        SELECT u.unit_id, u.trip_direction AS sentido, u.trip_number AS viagem, u.start_time,
+        SELECT u.unit_id, u.line_number, u.trip_status, u.trip_direction AS sentido, u.trip_number AS viagem, u.start_time,
                tu.label AS placa, tu.label2 AS prefixo,
                ds.latitude::float AS lat, ds.longitude::float AS lon, ds.speed, ds.local_time, ds.driver_name
         FROM ult u
         JOIN mova.tracked_unit tu ON tu.id = u.unit_id
         LEFT JOIN mova.dev_status ds ON ds.unit_id = u.unit_id
-        WHERE u.line_number = :l AND u.trip_status = true
         """,
-        {"g": group_id, "l": int(linha), "desde_ativo": datetime.now() - timedelta(minutes=JANELA_ATIVO_MIN)},
+        {"g": group_id, "desde_ativo": datetime.now() - timedelta(minutes=JANELA_ATIVO_MIN)},
     )
+
+
+#: Os ônibus de todas as linhas da empresa saem da mesma consulta; guardada 10 s, várias linhas e várias
+#: telas abertas (telão, CCO) não multiplicam a consulta no banco (PM, 12/10/2026: atualizar mais rápido).
+ULTIMOS_CACHE_S = 10
+
+
+async def _ultimos(group_id: int):
+    if (c := _cache(("ultimos", group_id), ULTIMOS_CACHE_S)) is not None:
+        return c
+    return _guardar(("ultimos", group_id), [dict(r) for r in await _ultimos_banco(group_id)])
+
+
+@router.get("")
+async def sinotico(
+    group_id: int = Query(...),
+    linha: str = Query(..., pattern=r"^\d{1,6}$"),
+    user=Depends(require_permission("reports", "read")),
+):
+    _grupo_permitido(user, group_id)
+    ultimos = [r for r in await _ultimos(group_id) if r["line_number"] == int(linha) and r["trip_status"]]
 
     sentidos = []
     for s in (0, 1):
@@ -295,6 +309,9 @@ async def sinotico(
             o["espacamento"] = (
                 None if g is None or not media else "colado" if g < COLADO * media else "buraco" if g > BURACO * media else "regular"
             )
+            # Situação do carro (PM, 12/10/2026: "atrasado, adiantado ou em tempo real"). Sem tabela horária
+            # ligada ao urbano, vale o intervalo: colando no da frente = adiantado; buraco à frente = atrasado.
+            o["situacao"] = {"colado": "adiantado", "buraco": "atrasado", "regular": "no_horario"}.get(o["espacamento"] or "")
         sentidos.append({
             "sentido": s,
             "nome": "Ida" if s == 0 else "Volta",
@@ -309,5 +326,6 @@ async def sinotico(
             "colados": sum(1 for o in na_rota if o.get("espacamento") == "colado"),
             "cvh": round(cvh, 2) if cvh is not None else None,
             "nivel_servico": nivel,
+            "criterio_situacao": "intervalo",
         })
     return {"linha": linha, "group_id": group_id, "atualizado": date.today().isoformat(), "sentidos": sentidos}
