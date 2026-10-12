@@ -32,7 +32,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -462,6 +462,103 @@ async def veiculo(unit_id: int, user=Depends(require_permission("reports", "read
         if dt_h >= 5 / 60 and 0 <= dl and dl / dt_h <= 150:  # plausível: até 150 L/h
             consumo, minutos = round(dl / dt_h, 1), round(dt_h * 60)
     return {"consumo_lh": consumo, "consumo_minutos": minutos}
+
+
+#: Comparativo do CCO: hoje até agora contra ontem e o mesmo dia da semana passada até o mesmo horário.
+#: Fonte: con_telemetry (viagens), a única atualizada durante o dia — con_driver_h_km e con_telemetry_day
+#: fecham com 1 a 2 dias de atraso (12/10/2026: o último dia fechado era 10/10). SUPOSIÇÃO: por ser por
+#: viagem, o km pode diferir do Gerencial (BI) em até ~15% (vault); serve para ver se melhorou ou piorou.
+SQL_DIA_ATE_AGORA = """
+SELECT count(DISTINCT ct.unit_id) AS veiculos,
+       sum(ct.distance_traveled) / 1000.0 AS km,
+       sum(CASE WHEN ct.fuel_used > 0 AND ct.distance_traveled::float / ct.fuel_used BETWEEN 0.8 AND 8 THEN ct.distance_traveled ELSE 0 END) / 1000.0 AS km_comb,
+       sum(CASE WHEN ct.fuel_used > 0 AND ct.distance_traveled::float / ct.fuel_used BETWEEN 0.8 AND 8 THEN ct.fuel_used ELSE 0 END) / 1000.0 AS litros,
+       sum(coalesce(ct.time_stop_engine_on, 0) + coalesce(ct.time_stop_engine_on_productive, 0)) AS parado_s,
+       sum(coalesce(ct.total_time, 0)) AS total_s,
+       sum(coalesce(ct.count_hard_brake, 0)) AS freadas, sum(coalesce(ct.count_hard_acel, 0)) AS aceleracoes,
+       sum(coalesce(ct.count_over_speed, 0)) AS excesso_velocidade
+FROM mova.con_telemetry ct JOIN mova.tracked_unit tu ON tu.id = ct.unit_id
+WHERE tu.group_id = :g AND ct.start_time >= :ini AND ct.start_time < :fim
+"""
+FADIGA = ("fadiga", "olhos fechados", "sonol", "bocejo")
+#: Feriados nacionais (2026 e 2027), para o comparativo avisar quando um dos dias não é dia normal
+#: (12/10/2026: a Fênix rodou 20 mil km até as 18h contra 64 mil na segunda anterior).
+FERIADOS = {
+    "2026-01-01": "Confraternização", "2026-02-16": "Carnaval", "2026-02-17": "Carnaval", "2026-04-03": "Sexta-feira Santa",
+    "2026-04-21": "Tiradentes", "2026-05-01": "Dia do Trabalho", "2026-06-04": "Corpus Christi", "2026-09-07": "Independência",
+    "2026-10-12": "Nossa Senhora Aparecida", "2026-11-02": "Finados", "2026-11-15": "Proclamação da República",
+    "2026-11-20": "Consciência Negra", "2026-12-25": "Natal",
+    "2027-01-01": "Confraternização", "2027-02-08": "Carnaval", "2027-02-09": "Carnaval", "2027-03-26": "Sexta-feira Santa",
+    "2027-04-21": "Tiradentes", "2027-05-01": "Dia do Trabalho", "2027-05-27": "Corpus Christi", "2027-09-07": "Independência",
+    "2027-10-12": "Nossa Senhora Aparecida", "2027-11-02": "Finados", "2027-11-15": "Proclamação da República",
+    "2027-11-20": "Consciência Negra", "2027-12-25": "Natal",
+}
+DIAS_SEMANA = ("segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo")
+INDICADORES_CACHE_S = 120
+
+
+async def _dia_ate_agora(group_id: int, dia, corte) -> dict:
+    ini = datetime.combine(dia, datetime.min.time())
+    fim = datetime.combine(dia, corte)
+    r = (await _ler(SQL_DIA_ATE_AGORA, {"g": group_id, "ini": ini, "fim": fim}))[0]
+    filtro = " OR ".join(f"lower({NOME_SQL}) LIKE '%{t}%'" for t in FADIGA)
+    fad = await _ler(f"""SELECT count(*) AS n FROM {await fonte_historico(ini, fim)} h {JOIN_TIPO}
+                         WHERE h.local_time >= :ini AND h.local_time < :fim AND ({filtro})
+                           AND h.unit_id IN (SELECT id FROM mova.tracked_unit WHERE group_id = :g)""", {"g": group_id, "ini": ini, "fim": fim})
+    f = lambda k: float(r[k] or 0)  # noqa: E731
+    return {
+        "dia": dia.isoformat(), "dia_semana": DIAS_SEMANA[dia.weekday()], "feriado": FERIADOS.get(dia.isoformat()),
+        "veiculos": int(r["veiculos"] or 0), "km": round(f("km")),
+        "litros": round(f("litros")), "kml": round(f("km_comb") / f("litros"), 2) if f("litros") > 0 else None,
+        "ocioso_pct": round(100 * f("parado_s") / f("total_s"), 1) if f("total_s") > 0 else None,
+        "freadas": int(f("freadas")), "aceleracoes": int(f("aceleracoes")), "excesso_velocidade": int(f("excesso_velocidade")),
+        "fadiga": int(fad[0]["n"]) if fad else 0,
+    }
+
+
+async def _pontualidade_urbano(group_id: int, user) -> Optional[dict]:
+    """% de ônibus no horário nas linhas em operação (critério do sinótico: pelo intervalo)."""
+    from app.api.v1.endpoints import cliente, sinotico
+    if not (await cliente._inferir(group_id)).get("urbano"):
+        return None
+    em_operacao = sorted({r["line_number"] for r in await sinotico._ultimos(group_id) if r["trip_status"] and r["line_number"]})
+    # Só as linhas com o trajeto já montado (alguém abriu o sinótico): montar do zero custava 200 s na
+    # Fênix (20 linhas). O CCO nunca pesa no banco por causa deste número.
+    hoje = date.today()
+    linhas = [ln for ln in em_operacao
+              if any(sinotico._cache(("ref", group_id, str(ln), s, hoje), 6 * 3600) is not None for s in (0, 1))]
+    cont = {"adiantado": 0, "no_horario": 0, "atrasado": 0}
+    for ln in linhas:
+        try:
+            d = await sinotico.sinotico(group_id=group_id, linha=str(ln), user=user)
+        except Exception:
+            continue
+        for s in d["sentidos"]:
+            for o in s["onibus"]:
+                if o.get("situacao") in cont:
+                    cont[o["situacao"]] += 1
+    total = sum(cont.values())
+    return {**cont, "total": total, "linhas": len(linhas), "linhas_em_operacao": len(em_operacao), "pct": round(100 * cont["no_horario"] / total, 1) if total else None,
+            "criterio": "intervalo"}
+
+
+@router.get("/indicadores")
+async def indicadores(group_id: int = Query(...), user=Depends(require_permission("reports", "read"))):
+    """Indicadores do CCO (PM, 12/10/2026): hoje até agora × ontem × semana passada e pontualidade."""
+    _grupos_do_usuario(user, group_id)
+    k = ("indicadores", group_id)
+    hit = _CACHE.get(k)
+    if hit and time.time() - hit[0] < INDICADORES_CACHE_S:
+        return hit[1]
+    agora = datetime.now()
+    corte = agora.time().replace(microsecond=0)
+    hoje = agora.date()
+    dias = {"hoje": hoje, "ontem": hoje - timedelta(days=1), "semana_passada": hoje - timedelta(days=7)}
+    comp = {nome: await _dia_ate_agora(group_id, d, corte) for nome, d in dias.items()}
+    out = {"corte": corte.strftime("%H:%M"), "comparativo": comp, "pontualidade": await _pontualidade_urbano(group_id, user),
+           "fonte": "viagens (con_telemetry), dia parcial até o horário do corte", "atualizado_em": agora.isoformat(timespec="seconds")}
+    _CACHE[k] = (time.time(), out)
+    return out
 
 
 @router.get("/contorno")

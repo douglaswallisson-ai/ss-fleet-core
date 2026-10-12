@@ -58,3 +58,8 @@ def test_contorno_da_cidade_em_lat_lng():
     d = montar(fc, 4205407, "Florianópolis", "SC")
     assert len(d["poligonos"]) == 2 and d["poligonos"][0][0] == [-27.8, -48.5]   # [lat, lng]
     assert d["caixa"] == [-27.8, -48.6, -27.4, -48.4]
+
+
+def test_feriados_do_comparativo():
+    assert cco.FERIADOS["2026-10-12"] == "Nossa Senhora Aparecida"
+    assert cco.DIAS_SEMANA[0] == "segunda" and len(cco.DIAS_SEMANA) == 7
