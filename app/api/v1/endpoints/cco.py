@@ -464,6 +464,20 @@ async def veiculo(unit_id: int, user=Depends(require_permission("reports", "read
     return {"consumo_lh": consumo, "consumo_minutos": minutos}
 
 
+@router.get("/contorno")
+async def contorno(cidade: str = Query(..., min_length=2, max_length=80), uf: str = Query(..., min_length=2, max_length=40),
+                   user=Depends(require_permission("reports", "read"))):
+    """Contorno oficial do município (IBGE) para o CCO mostrar só a cidade (PM, 12/10/2026)."""
+    from app.core.contorno_cidade import contorno as buscar
+    try:
+        d = await buscar(cidade, uf)
+    except Exception:
+        raise HTTPException(502, "Não foi possível buscar o contorno da cidade no IBGE agora.")
+    if not d:
+        raise HTTPException(404, f"Cidade não encontrada no IBGE: {cidade} ({uf}).")
+    return d
+
+
 @router.get("/posicao/{unit_id}")
 async def posicao(unit_id: int, user=Depends(require_permission("reports", "read"))):
     """Posição atual de um veículo, para "Seguir veículo": consulta leve, uma linha do dev_status."""

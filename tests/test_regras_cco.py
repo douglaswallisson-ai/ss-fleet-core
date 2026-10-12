@@ -48,3 +48,13 @@ def test_cidade_do_endereco():
     assert cco.local_do_endereco("AGUANIL - MG") == ("Aguanil", "MG", None)
     assert cco.local_do_endereco(None) == (None, None, None)
     assert cco.local_do_endereco("-19.9, -43.9") == (None, None, None)
+
+
+def test_contorno_da_cidade_em_lat_lng():
+    from app.core.contorno_cidade import montar
+    fc = {"features": [{"geometry": {"type": "MultiPolygon", "coordinates": [
+        [[[-48.5, -27.8], [-48.4, -27.8], [-48.4, -27.4], [-48.5, -27.8]]],
+        [[[-48.6, -27.6], [-48.55, -27.6], [-48.55, -27.55], [-48.6, -27.6]]]]}}]}
+    d = montar(fc, 4205407, "Florianópolis", "SC")
+    assert len(d["poligonos"]) == 2 and d["poligonos"][0][0] == [-27.8, -48.5]   # [lat, lng]
+    assert d["caixa"] == [-27.8, -48.6, -27.4, -48.4]
