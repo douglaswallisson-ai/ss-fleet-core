@@ -392,12 +392,12 @@ async def resumo(
         await db.execute(
             text(
                 f"""
-                SELECT h.unit_id, COALESCE(h.driver_id, 0) AS driver_id, MAX(h.label) AS placa, MAX(h.driver) AS motorista,
+                SELECT h.unit_id, COALESCE(h.driver_id, 0) AS driver_id, h.dt, MAX(h.label) AS placa, MAX(h.driver) AS motorista,
                        SUM({combustivel.litros_ml()}) / 1000.0 AS litros,
                        SUM({combustivel.km_com_combustivel_m()}) / 1000.0 AS km_comb
                 FROM mova.con_driver_h_km h
                 WHERE h.dt >= :ini AND h.dt <= :fim {esc}
-                GROUP BY 1, 2
+                GROUP BY 1, 2, 3
                 """
             ),
             {**par, "ini": ini, "fim": fim},
@@ -405,6 +405,7 @@ async def resumo(
     ).mappings().all()
     kml_u: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0])
     kml_m: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    kml_d: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
     placas: dict[int, str] = {}
     nomes: dict[int, str] = {}
     for r in cons:
@@ -413,10 +414,53 @@ async def resumo(
         kml_u[r["unit_id"]][1] += lt
         kml_m[r["driver_id"]][0] += km
         kml_m[r["driver_id"]][1] += lt
+        if f.driver_id is None or r["driver_id"] == f.driver_id:
+            kml_d[r["dt"].isoformat()][0] += km
+            kml_d[r["dt"].isoformat()][1] += lt
         if r["placa"]:
             placas[r["unit_id"]] = r["placa"]
         if r["motorista"] and r["driver_id"]:
             nomes[r["driver_id"]] = r["motorista"]
+    # Faixa de condução (PM, 13/10/2026: relação condução × altitude × km/l): % do tempo ANDANDO na faixa
+    # econômica (verde, extra-econômica, inércia e eco-roll) — parado ligado e parado acelerando ficam fora.
+    esc_t, par_t = f.sql(current_user, "td")
+    fx = (
+        await db.execute(
+            text(
+                f"""
+                SELECT td.unit_id, COALESCE(td.driver_id, 0) AS driver_id, td.day AS dia,
+                       SUM(COALESCE(td.time_green, 0) + COALESCE(td.time_extra_eco, 0) + COALESCE(td.time_inercia, 0)
+                           + COALESCE(td.time_eco_roll, 0)) AS eco,
+                       SUM(COALESCE(td.time_red, 0)) AS vermelha,
+                       SUM(COALESCE(td.time_green, 0) + COALESCE(td.time_extra_eco, 0) + COALESCE(td.time_inercia, 0)
+                           + COALESCE(td.time_eco_roll, 0) + COALESCE(td.time_low_speed, 0) + COALESCE(td.time_yellow, 0)
+                           + COALESCE(td.time_red, 0) + COALESCE(td.time_blue, 0) + COALESCE(td.time_banguela, 0)
+                           + COALESCE(td.time_tolerancia, 0)) AS andando
+                FROM mova.con_telemetry_day td
+                WHERE td.day >= :ini AND td.day <= :fim {esc_t}
+                GROUP BY 1, 2, 3
+                """
+            ),
+            {**par_t, "ini": ini, "fim": fim},
+        )
+    ).mappings().all()
+    fx_u: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+    fx_m: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+    fx_d: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+    for r in fx:
+        trio = (float(r["eco"] or 0), float(r["vermelha"] or 0), float(r["andando"] or 0))
+        alvos = [fx_u[r["unit_id"]], fx_m[r["driver_id"]]]
+        if f.driver_id is None or r["driver_id"] == f.driver_id:
+            alvos.append(fx_d[r["dia"].isoformat()])
+        for a in alvos:
+            for i in range(3):
+                a[i] += trio[i]
+
+    def faixa(t: Optional[list[float]]) -> dict:
+        if not t or t[2] <= 0:
+            return {"pct_faixa_eco": None, "pct_faixa_vermelha": None}
+        return {"pct_faixa_eco": round(100 * t[0] / t[2], 1), "pct_faixa_vermelha": round(100 * t[1] / t[2], 1)}
+
     faltam = [u for u in por_unidade if u not in placas]
     if faltam:
         for u, lbl in (await db.execute(text("SELECT id, label FROM mova.tracked_unit WHERE id = ANY(:ids)"), {"ids": faltam})).all():
@@ -426,13 +470,13 @@ async def resumo(
         return round(par_[0] / par_[1], 2) if par_ and par_[1] > 0 else None
 
     veiculos = [
-        {"unit_id": u, "placa": placas.get(u, str(u)), **_metricas(a), "kml": kml(kml_u.get(u))}
+        {"unit_id": u, "placa": placas.get(u, str(u)), **_metricas(a), "kml": kml(kml_u.get(u)), **faixa(fx_u.get(u))}
         for u, a in por_unidade.items()
         if a[1] > 0
     ]
     veiculos.sort(key=lambda x: -(x["subida_por_100km"] or 0))
     motoristas = [
-        {"driver_id": d, "nome": nomes.get(d) if d else "NÃO IDENTIFICADO", **_metricas(a), "kml": kml(kml_m.get(d))}
+        {"driver_id": d, "nome": nomes.get(d) if d else "NÃO IDENTIFICADO", **_metricas(a), "kml": kml(kml_m.get(d)), **faixa(fx_m.get(d))}
         for d, a in por_motorista.items()
         if a[1] > 0
     ]
@@ -447,7 +491,7 @@ async def resumo(
         "totais": {**_metricas(total), "veiculos": len(veiculos), "kml": kml([sum(x[0] for x in kml_u.values()), sum(x[1] for x in kml_u.values())])},
         "por_veiculo": veiculos,
         "por_motorista": motoristas,
-        "por_dia": [{"dia": d, **_metricas(a)} for d, a in sorted(por_dia.items())],
+        "por_dia": [{"dia": d, **_metricas(a), "kml": kml(kml_d.get(d)), **faixa(fx_d.get(d))} for d, a in sorted(por_dia.items())],
         "correlacao_kml": _pearson([b[0] for b in base], [b[1] for b in base]),
         "fonte": "Mapa de relevo SRTM (NASA), ~90 m; posições com o veículo andando",
     }
