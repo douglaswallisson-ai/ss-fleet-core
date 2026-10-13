@@ -80,6 +80,94 @@ def _r(v: Optional[float], casas: int = 1) -> Optional[float]:
     return None if v is None else round(v, casas)
 
 
+#: Gráfico de linhas do dia (PM, 13/10/2026: rpm, altitude, velocidade, combustível e faixas no tempo, como
+#: o gráfico da plataforma antiga). O dia inteiro, parado inclusive, reduzido a ~1.500 pontos.
+SQL_TELEMETRIA_DIA = """
+    SELECT d.local_time, d.latitude::float AS lat, d.longitude::float AS lon, d.speed, d.altitude,
+           COALESCE(NULLIF(d.can_rpm, 0), d.rpm)::float AS rpm, d.can_fuel_level_percent::float AS combustivel,
+           d.ignition, d.faixa, COALESCE(d.driver_id, 0) AS driver_id,
+           NULLIF(NULLIF(TRIM(d.driver_name), ''), 'NULL') AS motorista
+    FROM mova.dev_status_30 d
+    WHERE d.unit_id = :u AND d.local_time >= :ini AND d.local_time < :fim
+    ORDER BY d.local_time
+"""
+PONTOS_TELEMETRIA = 1500
+#: Faixas de rotação que viram linha de referência (mova.faixas).
+FAIXAS_RPM = {5: "Extra econômica", 4: "Verde", 6: "Amarela", 7: "Vermelha"}
+
+
+def _limites_faixas(linhas) -> list[dict]:
+    """Onde cada faixa começa e termina, pela classificação do próprio rastreador no dia (percentis 5 e 95
+    da rotação andando dentro da faixa). Não há tabela de limites por veículo no banco (consumption_profile
+    vazio na CECOTI, 13/10/2026)."""
+    por: dict[int, list[float]] = defaultdict(list)
+    for r in linhas:
+        if r["faixa"] in FAIXAS_RPM and r["rpm"] and (r["speed"] or 0) > 3:
+            por[r["faixa"]].append(float(r["rpm"]))
+    out = []
+    for fx, nome in FAIXAS_RPM.items():
+        v = sorted(por.get(fx, []))
+        if len(v) < 20:
+            continue
+        out.append({"faixa": fx, "nome": nome, "de": round(v[int(len(v) * 0.05)], -1), "ate": round(v[int(len(v) * 0.95)], -1), "leituras": len(v)})
+    return out
+
+
+@router.get("/telemetria-dia")
+async def telemetria_dia(
+    unit_id: int = Query(...),
+    dia: date = Query(...),
+    driver_id: Optional[int] = Query(None, description="Só as leituras deste motorista"),
+    db: AsyncSession = Depends(get_db_read),
+    current_user=Depends(require_permission("reports", "read")),
+):
+    """Rotação, velocidade, altitude, combustível e faixa ao longo do dia de um veículo."""
+    f = Filtros(group_id=None, subgroup_id=None, unit_id=unit_id, driver_id=None)
+    if not await _veiculos(db, current_user, f):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Veículo não encontrado")
+    ini = datetime.combine(dia, datetime.min.time())
+    linhas = [dict(r) for r in (await db.execute(text(SQL_TELEMETRIA_DIA), {"u": unit_id, "ini": ini, "fim": ini + timedelta(days=1)})).mappings().all()]
+    if driver_id is not None:
+        linhas = [r for r in linhas if r["driver_id"] == driver_id]
+    nomes_fx = {int(a): b for a, b in (await db.execute(text("SELECT id, name FROM mova.faixas"))).all()}
+    if not linhas:
+        return {"unit_id": unit_id, "dia": dia.isoformat(), "pontos": [], "faixas_rpm": [], "tempo_por_faixa": [], "altitude_do_equipamento": False}
+    tem_gps = sum(1 for r in linhas if r["altitude"]) > len(linhas) * 0.5
+
+    def montar():
+        passo = max(1, math.ceil(len(linhas) / PONTOS_TELEMETRIA))
+        pts = []
+        for i, r in enumerate(linhas):
+            if i % passo and i != len(linhas) - 1:
+                continue
+            elev = r["altitude"] if tem_gps and r["altitude"] else (relevo.elevacao(r["lat"], r["lon"]) if r["lat"] and r["lon"] and relevo.mapa_disponivel() else None)
+            pts.append({
+                "hora": r["local_time"].strftime("%H:%M:%S"),
+                "rpm": round(r["rpm"]) if r["rpm"] else 0,
+                "velocidade": round(float(r["speed"] or 0)),
+                "altitude": _r(elev, 0),
+                "combustivel": _r(r["combustivel"], 0) if r["combustivel"] and 0 < r["combustivel"] <= 100 else None,
+                "faixa": nomes_fx.get(r["faixa"]) if r["faixa"] is not None else None,
+                "ignicao": bool(r["ignition"]),
+                "motorista": r["motorista"],
+            })
+        return pts
+
+    pontos = await asyncio.to_thread(montar)
+    # Tempo em cada faixa: intervalo até a leitura seguinte (no máximo 5 min, para buracos de sinal não inflarem).
+    tempo: dict[str, float] = defaultdict(float)
+    for a, b in zip(linhas, linhas[1:]):
+        dt = min((b["local_time"] - a["local_time"]).total_seconds(), 300)
+        if a["faixa"] is not None and dt > 0:
+            tempo[nomes_fx.get(a["faixa"], str(a["faixa"]))] += dt
+    total = sum(tempo.values()) or 1
+    return {
+        "unit_id": unit_id, "dia": dia.isoformat(), "leituras": len(linhas), "altitude_do_equipamento": tem_gps,
+        "pontos": pontos, "faixas_rpm": _limites_faixas(linhas),
+        "tempo_por_faixa": sorted(({"faixa": k, "min": round(v / 60), "pct": round(100 * v / total, 1)} for k, v in tempo.items()), key=lambda x: -x["min"]),
+    }
+
+
 @router.get("/trajeto")
 async def trajeto(
     unit_id: int = Query(...),
