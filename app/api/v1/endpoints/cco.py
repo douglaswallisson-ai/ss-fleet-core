@@ -20,7 +20,7 @@ Fontes (só leitura):
 Achado (06/10/2026): `mova.fleet_events`, que Eventos e Videotelemetria usam,
 está VAZIA; as ocorrências reais de câmera estão em `vcms.vcms_history`.
 
-Janela: avisos das últimas `horas` (padrão 2; o painel deixa escolher 1, 2, 6 ou 12).
+Janela: avisos das últimas `horas` (padrão 24 — PM, 13/10/2026: "os eventos do CCO devem ser os das últimas 24 h").
 Agrupamento: o equipamento gera muito evento (10 mil acelerações bruscas em 12
 h). Um aviso = veículo + tipo, com a contagem e o horário do último. Visto ou
 Tratado grava a hora; só ocorrências depois dela reabrem o aviso. As marcações
@@ -52,8 +52,9 @@ router = APIRouter()
 ARQUIVO = Path(__file__).resolve().parents[4] / "data" / "cco.sqlite"
 _trava = threading.Lock()
 _CACHE: dict[tuple, tuple[float, object]] = {}
-#: Janela padrão dos avisos. Com 12 h, 84 dos 132 carros da CECOTI ficavam vermelhos (06/10/2026).
-JANELA_PADRAO_H = 2
+#: Janela padrão dos avisos: últimas 24 h (PM, 13/10/2026). Antes eram 2 h (com 12 h, 84 dos 132 carros da
+#: CECOTI ficavam vermelhos em 06/10/2026).
+JANELA_PADRAO_H = 24
 SEM_COMUNICACAO_H = 2
 CACHE_S = 25
 CACHE_MANUT_S = 300
@@ -261,7 +262,7 @@ def _iso(v):
 
 
 @router.get("/painel")
-async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANELA_PADRAO_H, ge=1, le=12), user=Depends(require_permission("reports", "read"))):
+async def painel(group_id: Optional[int] = Query(None), horas: int = Query(JANELA_PADRAO_H, ge=1, le=24), user=Depends(require_permission("reports", "read"))):
     grupos = _grupos_do_usuario(user, group_id)
     chave_cache = ("painel", tuple(grupos) if grupos else None, horas)
     hit = _CACHE.get(chave_cache)
