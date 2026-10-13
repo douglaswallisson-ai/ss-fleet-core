@@ -35,6 +35,7 @@ from sqlalchemy import text
 from app.api.v1.endpoints import cliente
 from app.core import combustivel
 from app.core.database import AsyncSessionLocalReplica
+from app.core.porte import NOME_PORTE, PORTES, porte_do_modelo
 from app.middleware.auth import require_permission
 
 router = APIRouter()
@@ -105,6 +106,47 @@ SELECT g.id AS group_id, g.name,
                 WHERE ct.start_time > :desde_linha AND ct.start_time < :ate_limite AND ct.line_number > 0) AS urbano
 FROM mova."group" g WHERE g.id = ANY(:grupos)
 """
+
+
+#: Carga: consumo por porte (PM, 13/10/2026 — a CECOTI, com leves e médios, contra frotas de cavalo
+#: mecânico não é comparação). Km por veículo para somar por porte (app/core/porte.py).
+SQL_KM_VEICULO = f"""
+SELECT h.group_id, h.unit_id, sum(h.distance_traveled_hist) / 1000.0 AS km,
+       sum({combustivel.km_com_combustivel_m()}) / 1000.0 AS km_comb, sum({combustivel.litros_ml()}) / 1000.0 AS litros
+FROM mova.con_driver_h_km h
+WHERE h.dt >= :ini AND h.dt <= :fim AND h.group_id = ANY(:grupos)
+GROUP BY 1, 2
+"""
+SQL_MODELO = """
+SELECT tu.id, vm.nome, tu.label2, tu.unit_category_id FROM mova.tracked_unit tu
+LEFT JOIN mova.vehicle_model vm ON vm.id = tu.vehicle_model_id WHERE tu.id = ANY(:ids)
+"""
+#: Mínimo de km de um porte no cliente para o consumo daquele porte entrar.
+KM_MIN_PORTE = 1000
+CATEGORIAS_FORA_DO_PORTE = (1, 2, 9, 12, 22)  # carro, pickup, moto, ônibus, micro
+
+
+def kml_por_porte(linhas: list[dict], modelos: dict[int, tuple]) -> dict[int, dict[str, Optional[float]]]:
+    """km/l de cada cliente em cada porte, com as mesmas regras do consumo geral."""
+    soma: dict[int, dict[str, list[float]]] = {}
+    for r in linhas:
+        m = modelos.get(r["unit_id"])
+        if not m or m[2] in CATEGORIAS_FORA_DO_PORTE:
+            continue
+        pt = porte_do_modelo(m[0], m[1])
+        if not pt:
+            continue
+        a = soma.setdefault(r["group_id"], {}).setdefault(pt, [0.0, 0.0, 0.0])
+        a[0] += float(r["km"] or 0); a[1] += float(r["km_comb"] or 0); a[2] += float(r["litros"] or 0)
+    out: dict[int, dict[str, Optional[float]]] = {}
+    for g, por in soma.items():
+        for pt, (km, km_comb, litros) in por.items():
+            v = None
+            if km >= KM_MIN_PORTE and litros > 0 and km_comb / km >= COBERTURA_COMBUSTIVEL_MIN:
+                kml = km_comb / litros
+                v = round(kml, 2) if KML_FAIXA[0] <= kml <= KML_FAIXA[1] else None
+            out.setdefault(g, {})[pt] = v
+    return out
 
 
 def segmento(urbano: bool, onibus: int, ajuste: Optional[dict] = None, maquinas: int = 0, ativos: int = 0) -> str:
@@ -197,7 +239,11 @@ async def _base(ini: date, fim: date) -> dict:
             "grupos": elegiveis, "cats": list(cliente.CATEGORIAS_ONIBUS), "maq": list(CATEGORIAS_MAQUINA),
             # Linhas no mesmo período do comparativo (a JTP rodou 34 linhas em 30 dias e nenhuma nos últimos 15).
             "desde_linha": ini, "ate_limite": fim + timedelta(days=1)})).mappings()}
-    d = {"kms": kms, "ocs": ocs, "elegiveis": elegiveis, "segs": segs}
+        carga = [g for g in elegiveis]
+        por_veic = [dict(r) for r in (await db.execute(text(SQL_KM_VEICULO), {**p, "grupos": carga})).mappings()]
+        ids = list({r["unit_id"] for r in por_veic})
+        modelos = {r[0]: (r[1], r[2], r[3]) for r in (await db.execute(text(SQL_MODELO), {"ids": ids})).all()} if ids else {}
+    d = {"kms": kms, "ocs": ocs, "elegiveis": elegiveis, "segs": segs, "porte": kml_por_porte(por_veic, modelos)}
     _CACHE[chave] = (time.time(), d)
     return d
 
@@ -246,6 +292,24 @@ async def comparativo(group_id: int = Query(...), dias: int = Query(30, ge=7, le
         saida.append({"chave": chave, "nome": nome_ind, "unidade": unidade, "menor_melhor": menor, "explicacao": explica,
                       "valor": meus[chave], "comparavel": chave not in NAO_COMPARAVEIS, **r,
                       "iguais": sorted(({"nome": n, "valor": v} for n, v in iguais), key=lambda x: x["valor"])})
+    if meu_seg == "carga":
+        # O consumo geral mistura portes: na carga vale o consumo de cada porte contra o mesmo porte.
+        for i in saida:
+            if i["chave"] == "kml":
+                i.update({"situacao": "nao_comparavel", "comparavel": False, "iguais": [], "nome": "Consumo geral (todos os portes)",
+                          "motivo": "Mistura caminhões leves, médios e cavalos: compare pelo consumo de cada porte, abaixo."})
+        mp = b["porte"].get(group_id, {})
+        for pt in PORTES:
+            if pt not in mp:
+                continue
+            iguais = [(nome[g], b["porte"][g][pt]) for g in iguais_ids if b["porte"].get(g, {}).get(pt) is not None]
+            r = comparar(mp[pt], iguais, False)
+            if mp[pt] is None:
+                r = {"situacao": "sem_dado", "motivo": f"Menos de {KM_MIN_PORTE:,} km com combustível medido neste porte.".replace(",", ".")}
+            saida.append({"chave": f"kml_{pt}", "nome": f"Consumo · {NOME_PORTE[pt]}", "unidade": "km/l", "menor_melhor": False,
+                          "explicacao": "Só os veículos deste porte, contra o mesmo porte das outras empresas. Porte pelo nome do modelo.",
+                          "valor": mp[pt], "comparavel": True, **r,
+                          "iguais": sorted(({"nome": n, "valor": v} for n, v in iguais), key=lambda x: x["valor"])})
     k = b["kms"][group_id]
     return {
         "group_id": group_id, "segmento": meu_seg, "segmento_nome": NOME_SEGMENTO[meu_seg],

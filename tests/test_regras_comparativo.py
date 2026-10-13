@@ -37,3 +37,16 @@ def test_posicao_entre_iguais():
     assert comparar(60.0, iguais, menor_melhor=False)["situacao"] == "melhor"
     assert comparar(None, iguais, True)["situacao"] == "sem_dado"
     assert comparar(1.0, iguais[:2], True)["situacao"] == "poucos_iguais"
+
+
+def test_consumo_por_porte():
+    from app.api.v1.endpoints.comparativo import kml_por_porte
+    linhas = [
+        {"group_id": 1, "unit_id": 10, "km": 2000, "km_comb": 2000, "litros": 450},   # leve 4,44
+        {"group_id": 1, "unit_id": 11, "km": 3000, "km_comb": 3000, "litros": 1500},  # cavalo 2,0
+        {"group_id": 1, "unit_id": 12, "km": 500, "km_comb": 500, "litros": 100},     # médio: pouco km
+        {"group_id": 1, "unit_id": 13, "km": 9000, "km_comb": 9000, "litros": 900},   # carro: fora
+    ]
+    modelos = {10: ("8.160 DRC 4X2", None, 3), 11: ("VOLVO/FH 460 8X2T", None, 3), 12: ("ATEGO 1719", None, 3), 13: ("Gol", None, 1)}
+    r = kml_por_porte(linhas, modelos)[1]
+    assert r["leve"] == 4.44 and r["pesado"] == 2.0 and r["medio"] is None and "semipesado" not in r
