@@ -17,8 +17,8 @@ Regras:
     valor do próprio cliente (zero ou mais de 0,5 por km = o equipamento não mede).
 - Máquinas: cliente com 30% ou mais de máquinas (categorias 5, 6, 8, 23) só se compara
   com outros assim (a Unibase, com 26 máquinas em 57, entrava como transportadora).
-- Os outros clientes aparecem sem nome ("Cliente A", "Cliente B"…). Só a SS vê
-  os nomes.
+- Os outros clientes aparecem sem nome ("Cliente A", "Cliente B"…), para todos —
+  inclusive a SS (PM, 13/10/2026).
 
 Só leitura (con_driver_h_km, con_telemetry_day, con_telemetry, tracked_unit).
 """
@@ -180,7 +180,7 @@ def comparar(meu: Optional[float], iguais: list[tuple[str, float]], menor_melhor
 
 def _rotulos(n: int) -> list[str]:
     letras = string.ascii_uppercase
-    return [f"Cliente {letras[i % 26]}{'' if i < 26 else i // 26}" for i in range(n)]
+    return [f"Empresa {letras[i % 26]}{'' if i < 26 else i // 26}" for i in range(n)]
 
 
 async def _base(ini: date, fim: date) -> dict:
@@ -228,9 +228,9 @@ async def comparativo(group_id: int = Query(...), dias: int = Query(30, ge=7, le
     meu_seg = seg_de(group_id)
     iguais_ids = sorted((g for g in b["elegiveis"] if g != group_id and seg_de(g) == meu_seg),
                         key=lambda g: -float(b["kms"][g]["km"] or 0))
-    ss = bool(getattr(user, "is_super_admin", False))
     rotulo = dict(zip(iguais_ids, _rotulos(len(iguais_ids))))
-    nome = {g: ((b["segs"].get(g) or {}).get("name") if ss else rotulo[g]) for g in iguais_ids}
+    # Nunca o nome do cliente, nem para a SS (PM, 13/10/2026: a tela vai para cliente e o nome no mouse é perigoso).
+    nome = {g: rotulo[g] for g in iguais_ids}
     vals = {g: indicadores_do_cliente(b["kms"][g], b["ocs"].get(g), dias) for g in iguais_ids}
     meus = indicadores_do_cliente(b["kms"][group_id], b["ocs"].get(group_id), dias)
 
@@ -250,7 +250,7 @@ async def comparativo(group_id: int = Query(...), dias: int = Query(30, ge=7, le
     return {
         "group_id": group_id, "segmento": meu_seg, "segmento_nome": NOME_SEGMENTO[meu_seg],
         "inicio": ini.isoformat(), "fim": fim.isoformat(), "dias": dias,
-        "iguais": len(iguais_ids), "nomes_visiveis": ss,
+        "iguais": len(iguais_ids), "nomes_visiveis": False,
         "base": {"veiculos": int(k["veiculos"] or 0), "km": round(float(k["km"] or 0))},
         "indicadores": saida,
         "regras": {"km_min": KM_MIN, "veiculos_min": VEICULOS_MIN, "iguais_min": IGUAIS_MIN},

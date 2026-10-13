@@ -38,7 +38,8 @@ KM_MIN_PERFIL = 5  # km: trajeto mais curto não recebe classe de relevo
 #: Pontos do gráfico do trajeto; o cálculo usa todos.
 MAX_PONTOS_GRAFICO = 900
 #: Leituras de dias em paralelo, cada uma numa conexão.
-PARALELO = 4
+#: Dias calculados ao mesmo tempo. Era 4; com 2 o banco e o servidor ficam livres para as telas (PM, 13/10/2026).
+PARALELO = 2
 
 SQL_POSICOES = """
     SELECT d.unit_id, d.local_time, d.latitude::float AS lat, d.longitude::float AS lon,
@@ -196,6 +197,12 @@ async def _calcular_dia(dia: date, ids: list[int]) -> dict[int, dict]:
                 {"ids": ids, "ini": ini, "fim": ini + timedelta(days=1)},
             )
         ).all()
+    # A conta ponto a ponto é pesada (centenas de milhares de posições por dia) e, feita aqui, travava o
+    # servidor inteiro enquanto calculava: as outras telas não carregavam (PM, 13/10/2026). Vai para outra thread.
+    return await asyncio.to_thread(_relevo_das_posicoes, linhas, ids)
+
+
+def _relevo_das_posicoes(linhas, ids: list[int]) -> dict[int, dict]:
     por_unidade: dict[int, list] = defaultdict(list)
     for u, _t, lat, lon, _v, _a, drv, _ev in linhas:
         por_unidade[u].append((lat, lon, drv))
