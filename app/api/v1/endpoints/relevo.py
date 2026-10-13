@@ -381,6 +381,8 @@ async def resumo(
     por_unidade: dict[int, list[float]] = defaultdict(lambda: [0.0] * 6)
     por_motorista: dict[int, list[float]] = defaultdict(lambda: [0.0] * 6)
     por_dia: dict[str, list[float]] = defaultdict(lambda: [0.0] * 6)
+    # Veículo × dia: para a relação "o mesmo caminhão com ele mesmo" (PM, 13/10/2026).
+    por_ud: dict[tuple[int, str], list[float]] = defaultdict(lambda: [0.0] * 6)
     total = [0.0] * 6
     for (u, d), por_drv in dados.items():
         for drv, v in por_drv.items():
@@ -390,6 +392,7 @@ async def resumo(
             _somar(por_unidade[u], v)
             _somar(por_motorista[drv_i], v)
             _somar(por_dia[d], v)
+            _somar(por_ud[(u, d)], v)
             _somar(total, v)
 
     # Consumo do período, para o cruzamento (mesma regra do ranking: km com
@@ -413,6 +416,7 @@ async def resumo(
     kml_u: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0])
     kml_m: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0])
     kml_d: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    kml_ud: dict[tuple[int, str], list[float]] = defaultdict(lambda: [0.0, 0.0])
     placas: dict[int, str] = {}
     nomes: dict[int, str] = {}
     for r in cons:
@@ -424,6 +428,8 @@ async def resumo(
         if f.driver_id is None or r["driver_id"] == f.driver_id:
             kml_d[r["dt"].isoformat()][0] += km
             kml_d[r["dt"].isoformat()][1] += lt
+            kml_ud[(r["unit_id"], r["dt"].isoformat())][0] += km
+            kml_ud[(r["unit_id"], r["dt"].isoformat())][1] += lt
         if r["placa"]:
             placas[r["unit_id"]] = r["placa"]
         if r["motorista"] and r["driver_id"]:
@@ -454,11 +460,13 @@ async def resumo(
     fx_u: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
     fx_m: dict[int, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
     fx_d: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
+    fx_ud: dict[tuple[int, str], list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0])
     for r in fx:
         trio = (float(r["eco"] or 0), float(r["vermelha"] or 0), float(r["andando"] or 0))
         alvos = [fx_u[r["unit_id"]], fx_m[r["driver_id"]]]
         if f.driver_id is None or r["driver_id"] == f.driver_id:
             alvos.append(fx_d[r["dia"].isoformat()])
+            alvos.append(fx_ud[(r["unit_id"], r["dia"].isoformat())])
         for a in alvos:
             for i in range(3):
                 a[i] += trio[i]
@@ -499,6 +507,11 @@ async def resumo(
         "por_veiculo": veiculos,
         "por_motorista": motoristas,
         "por_dia": [{"dia": d, **_metricas(a), "kml": kml(kml_d.get(d)), **faixa(fx_d.get(d))} for d, a in sorted(por_dia.items())],
+        # Só os dias com 20 km ou mais medidos (os outros não dizem nada sobre consumo).
+        "por_veiculo_dia": [
+            {"unit_id": u, "placa": placas.get(u, str(u)), "dia": d, **_metricas(a), "kml": kml(kml_ud.get((u, d))), **faixa(fx_ud.get((u, d)))}
+            for (u, d), a in sorted(por_ud.items()) if a[1] >= 20
+        ],
         "correlacao_kml": _pearson([b[0] for b in base], [b[1] for b in base]),
         "fonte": "Mapa de relevo SRTM (NASA), ~90 m; posições com o veículo andando",
     }
