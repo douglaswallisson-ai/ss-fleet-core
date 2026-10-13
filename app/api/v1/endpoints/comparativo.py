@@ -121,6 +121,18 @@ SQL_MODELO = """
 SELECT tu.id, vm.nome, tu.label2, tu.unit_category_id FROM mova.tracked_unit tu
 LEFT JOIN mova.vehicle_model vm ON vm.id = tu.vehicle_model_id WHERE tu.id = ANY(:ids)
 """
+#: Base externa estimada (PM, 13/10/2026: "mesmo que estimado"). Não há estudo oficial com km/l por porte;
+#: a referência é o guia de mercado Cidesp (18/05/2026), que diz compilar dados de mercado e o relatório de
+#: custos operacionais do DNIT (abr/2021). SUPOSIÇÃO: o enquadramento segue os modelos de exemplo do guia,
+#: não o nome da categoria dele (o guia chama o VW Delivery 9.170 de "médio" e põe o FH460 em "truck").
+#: Médio (11–19 t, ex.: Atego 1719) não tem faixa no guia.
+REFERENCIA_MERCADO = {
+    "leve": (3.5, 5.0, "guia de mercado: VW Delivery 9.170, Ford Cargo 816"),
+    "semipesado": (2.2, 3.2, "guia de mercado: truck/toco"),
+    "pesado": (1.8, 2.5, "guia de mercado: carreta simples"),
+}
+FONTE_MERCADO = "Estimativa de mercado (guia Cidesp, mai/2026, com dados de mercado e custos operacionais do DNIT, abr/2021)"
+
 #: Mínimo de km de um porte no cliente para o consumo daquele porte entrar.
 KM_MIN_PORTE = 1000
 CATEGORIAS_FORA_DO_PORTE = (1, 2, 9, 12, 22)  # carro, pickup, moto, ônibus, micro
@@ -309,6 +321,9 @@ async def comparativo(group_id: int = Query(...), dias: int = Query(30, ge=7, le
             saida.append({"chave": f"kml_{pt}", "nome": f"Consumo · {NOME_PORTE[pt]}", "unidade": "km/l", "menor_melhor": False,
                           "explicacao": "Só os veículos deste porte, contra o mesmo porte das outras empresas. Porte pelo nome do modelo.",
                           "valor": mp[pt], "comparavel": True, **r,
+                          "referencia_mercado": ({"min": REFERENCIA_MERCADO[pt][0], "max": REFERENCIA_MERCADO[pt][1],
+                                                  "base": REFERENCIA_MERCADO[pt][2], "fonte": FONTE_MERCADO, "estimada": True}
+                                                 if pt in REFERENCIA_MERCADO else None),
                           "iguais": sorted(({"nome": n, "valor": v} for n, v in iguais), key=lambda x: x["valor"])})
     k = b["kms"][group_id]
     return {
