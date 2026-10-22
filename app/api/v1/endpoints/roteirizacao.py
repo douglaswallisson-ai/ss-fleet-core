@@ -506,3 +506,9 @@ async def rotograma(p: Pedido, user=Depends(require_permission("reports", "read"
                 f"Pontos críticos: eventos da própria frota a até {CRITICO_RAIO_M} m do caminho nos últimos {CRITICO_DIAS} dias, a partir de {CRITICO_MIN_EVENTOS} no mesmo lugar.",
                 "Velocidades máximas: cercas do cliente com limite cadastrado que cruzam o caminho.",
             ) if x]}
+
+
+# Rota automática de fretamento (planilha de funcionários → pontos de embarque e rotas), PM 22/10/2026.
+from app.api.v1.endpoints import fretamento_auto as _fretamento_auto  # noqa: E402
+
+router.include_router(_fretamento_auto.router, prefix="/fretamento-auto")
