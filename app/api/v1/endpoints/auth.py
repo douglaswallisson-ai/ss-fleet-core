@@ -3,7 +3,9 @@ Authentication endpoints.
 Handles user login, token refresh, and logout.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -206,9 +208,22 @@ async def sso_handoff(
     )
 
 
+def _refresh_do_pedido(query: Optional[str], corpo: Optional[dict]) -> str:
+    """O refresh token vem no corpo JSON (`{"refresh_token": ...}`, como o sistema novo manda) ou na URL.
+
+    Antes só a URL era aceita e o sistema novo mandava no corpo: toda renovação dava 422, as telas
+    ficavam sem dados quando o access token vencia e o PM tinha de sair e entrar de novo (22/10/2026).
+    """
+    token = query or (corpo or {}).get("refresh_token")
+    if not token or not isinstance(token, str):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token ausente")
+    return token
+
+
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
-    refresh_token: str,
+    refresh_token: Optional[str] = Query(None),
+    corpo: Optional[dict] = Body(None),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -216,6 +231,7 @@ async def refresh_token(
 
     Uses refresh token to generate a new access token.
     """
+    refresh_token = _refresh_do_pedido(refresh_token, corpo)
     # Verify refresh token exists in Redis
     user_id = await async_redis_client.get(f"refresh_token:{refresh_token}")
 
@@ -251,12 +267,13 @@ async def refresh_token(
 
 
 @router.post("/logout")
-async def logout(refresh_token: str):
+async def logout(refresh_token: Optional[str] = Query(None), corpo: Optional[dict] = Body(None)):
     """
     User logout.
 
     Revokes refresh token by removing it from Redis.
     """
+    refresh_token = _refresh_do_pedido(refresh_token, corpo)
     # Delete refresh token from Redis
     await async_redis_client.delete(f"refresh_token:{refresh_token}")
 
