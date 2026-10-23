@@ -259,8 +259,11 @@ async def _historico_24h_banco(group_id: int) -> dict[int, dict]:
                count(*) FILTER (WHERE d.can_rpm >= 1600 AND d.can_engine_oil_pressure > 0) AS oleo_n_alto,
                count(*) FILTER (WHERE d.can_rpm >= 500 AND d.voltage >= 5) AS v_lig_n,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY d.voltage) FILTER (WHERE d.can_rpm >= 500 AND d.voltage >= 5) AS v_lig_med,
-               count(*) FILTER (WHERE coalesce(d.can_rpm, 0) = 0 AND d.voltage >= 5) AS v_desl_n,
-               percentile_cont(0.5) WITHIN GROUP (ORDER BY d.voltage) FILTER (WHERE coalesce(d.can_rpm, 0) = 0 AND d.voltage >= 5) AS v_desl_med,
+               -- Bateria parada = IGNIÇÃO DESLIGADA, não "sem rotação" (23/10/2026): com a ignição ligada e o motor
+               -- parado (luzes, plataforma, partida) a tensão cai com bateria boa, e eram 28% das leituras "paradas"
+               -- da CECOTI; os carros sem rotação no CAN também entravam com o motor ligado.
+               count(*) FILTER (WHERE NOT d.ignition AND d.voltage >= 5) AS v_desl_n,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY d.voltage) FILTER (WHERE NOT d.ignition AND d.voltage >= 5) AS v_desl_med,
                count(*) FILTER (WHERE d.can_def_level_percent BETWEEN 1 AND 100) AS arla_n,
                count(*) FILTER (WHERE d.can_def_level_percent > 0) AS arla_total,
                count(*) FILTER (WHERE d.can_def_level_percent > 100) AS arla_codigo,
