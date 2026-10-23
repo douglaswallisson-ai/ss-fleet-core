@@ -222,6 +222,8 @@ ARLA_SUBIDAS_MAX = 3
 TEMP_JANELA_MIN = 30
 # Sem ligar o motor há mais que isso, bateria baixa é descarga de veículo parado.
 BATERIA_PARADO_H = 48
+#: Pressão do óleo que varia menos que isso entre marcha lenta e 1.600+ rpm não é leitura do sensor.
+OLEO_PARADO_KPA = 10.0
 TEMP_MIN_LEITURAS = 3
 OLEO_TETO = 240  # kPa: perto do limite de 1 byte (255) — a partir daqui a leitura estoura
 
@@ -362,7 +364,14 @@ def _suspeitos(v: dict, h: dict) -> list[dict]:
 
 def _suspeitos_brutos(v: dict, h: dict) -> list[dict]:
     s = []
-    if h.get("oleo_todas", 0) >= MIN_LEITURAS and h.get("oleo_valores") == 1:
+    # Parado = um valor só, OU a pressão não sobe com a rotação (23/10/2026: 8 caminhões da CECOTI com 43–44 kPa a
+    # 600 rpm e a 1.600+ rpm a semana toda — 10.240 leituras em rotação alta — davam "Pressão de óleo baixa" crítico;
+    # com a pressão real assim o motor fundiria).
+    parado = h.get("oleo_valores") == 1 or (
+        h.get("oleo_n_alto", 0) >= MIN_LEITURAS and h.get("oleo_n", 0) >= MIN_LEITURAS
+        and h.get("oleo_med") is not None and h.get("oleo_med_alto") is not None and h.get("oleo_max") is not None
+        and abs(h["oleo_med_alto"] - h["oleo_med"]) <= OLEO_PARADO_KPA and h["oleo_max"] - h["oleo_med"] <= OLEO_PARADO_KPA)
+    if h.get("oleo_todas", 0) >= MIN_LEITURAS and parado:
         s.append({"sinal": "oleo", "titulo": "Pressão do óleo: o rastreador não está medindo",
                   "detalhe": f"O valor chega sempre igual ({h['oleo_max']:.0f} kPa), com o motor em marcha lenta ou acelerando. A pressão de verdade muda com a rotação, então esse número não é a pressão do óleo. Enquanto isso, a plataforma não consegue avisar sobre o óleo deste veículo.",
                   "acao": "A SS ajusta a leitura do óleo no rastreador. O caminhão não precisa ir para a oficina por isso."})
