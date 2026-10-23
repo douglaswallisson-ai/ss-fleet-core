@@ -40,6 +40,8 @@ router = APIRouter()
 _CACHE: dict[tuple, tuple[float, object]] = {}
 CACHE_S = 1800
 DIAS_TENDENCIA = 14
+#: Leituras mínimas por dia na janela de 2 a 3 h depois de desligar para o dia contar na bateria.
+MIN_LEITURAS_BATERIA = 3
 MIN_DIAS = 7
 
 #: Acima disto (eventos de condução por km) a contagem é do equipamento, não do motorista.
@@ -87,19 +89,34 @@ def tendencias(dias: list[dict]) -> list[dict]:
     def serie(campo, ok=lambda v: True):
         return [((d["dia"] - d0).days, float(d[campo])) for d in dias if d.get(campo) is not None and ok(float(d[campo]))]
 
-    # Bateria em repouso (motor desligado): 24 V ou 12 V pelo nível.
-    bat = serie("v_repouso", lambda v: 5 < v < 32)
-    if len(bat) >= 8:
-        ini, fim = _mediana([y for _, y in bat[:4]]), _mediana([y for _, y in bat[-4:]])
-        s = inclinacao(bat)
-        v24 = fim > 18
-        limite, queda_min, teto = (24.0, 0.5, 25.0) if v24 else (12.0, 0.25, 12.5)
-        if s is not None and s < 0 and ini - fim >= queda_min and fim < teto:
-            dias_ate = int((fim - limite) / -s) if fim > limite else 0
-            out.append({"chave": "bateria", "titulo": "Bateria perdendo carga",
-                        "detalhe": f"Em repouso: {ini:.1f} V → {fim:.1f} V (mediana do início e do fim de {len(bat)} dias)"
-                                   + (f"; no ritmo atual chega a {limite:.0f} V em ~{dias_ate} dias." if dias_ate else f"; já abaixo de {limite:.0f} V."),
-                        "por_dia": round(s, 3)})
+    # Bateria 2 a 3 h depois de desligar (mesma condição todo dia), 24 V ou 12 V pelo nível.
+    # Dia com 1 ou 2 leituras nessa janela não vale (QOL-6246: 12,8 → 9,1 → 12,8 V de um dia para o outro com uma leitura).
+    bat = [((d["dia"] - d0).days, float(d["v_repouso"])) for d in dias
+           if d.get("v_repouso") is not None and 5 < float(d["v_repouso"]) < 32 and (d.get("v_repouso_n") or 0) >= MIN_LEITURAS_BATERIA]
+    if bat:
+        v24 = _mediana([y for _, y in bat]) > 18
+        baixa, limite, queda_min, teto = (23.5, 24.0, 0.5, 24.8) if v24 else (11.8, 12.0, 0.25, 12.4)
+        ultimo = bat[-1][0]
+        semana = [(x, y) for x, y in bat if x > ultimo - 7]
+        baixos = [y for _, y in semana if y < baixa]
+        # Bateria boa de 24 V fica acima de 24,4 V duas horas depois de desligar. Em 2 dias ou mais da semana abaixo de
+        # 23,5 V: ou ela não segura carga (RTR-8I02: 23,1–23,4 V todo dia) ou algo puxa energia com o veículo desligado
+        # (TYJ-4B87: 25,2 V na maioria dos dias e 22,6–22,8 V em três).
+        if len(baixos) >= 2:
+            out.append({"chave": "bateria", "titulo": "Bateria fraca depois de desligar",
+                        "detalhe": f"Duas a três horas depois de desligar, a bateria estava em {min(baixos):.1f}–{max(baixos):.1f} V em {len(baixos)} "
+                                   f"dos {len(semana)} dias medidos na última semana (bateria boa de {'24' if v24 else '12'} V fica acima de "
+                                   f"{24.4 if v24 else 12.2:.1f} V). Pode não dar partida depois de um tempo parado.",
+                        "por_dia": None})
+        elif len(bat) >= 6:
+            ini, fim = _mediana([y for _, y in bat[:3]]), _mediana([y for _, y in bat[-3:]])
+            s = inclinacao(bat)
+            if s is not None and s < 0 and ini - fim >= queda_min and fim < teto:
+                dias_ate = int((fim - limite) / -s) if fim > limite else 0
+                out.append({"chave": "bateria", "titulo": "Bateria perdendo carga",
+                            "detalhe": f"Duas a três horas depois de desligar: {ini:.1f} V → {fim:.1f} V (mediana dos 3 primeiros e dos 3 últimos de {len(bat)} dias medidos)"
+                                       + (f"; no ritmo atual chega a {limite:.0f} V em ~{dias_ate} dias." if dias_ate else f"; já abaixo de {limite:.0f} V."),
+                            "por_dia": round(s, 3)})
     # Temperatura do motor (média com o motor trabalhando).
     tmp = serie("temp_media", lambda v: 40 < v < 130)
     if len(tmp) >= 8:
@@ -155,18 +172,29 @@ def nota(v: dict, tend: list[dict], pct_conducao: Optional[float], conducao_susp
 
 SQL_DIARIO = """
 WITH un AS (SELECT id FROM mova.tracked_unit WHERE group_id = :g AND status = 1),
+-- Bateria medida SEMPRE NA MESMA CONDIÇÃO: entre 2 e 3 h depois de desligar a ignição (23/10/2026). A mediana de
+-- todas as leituras desligadas dependia de quanto tempo o veículo ficou parado (logo após desligar há a carga de
+-- superfície do alternador, 26,7–26,8 V no OLC-8E81 da RCA; parado o dia todo a tensão cai com bateria boa) e
+-- 6 das 8 "tendências" de bateria da RCA e da CECOTI eram só isso (RMH-9G68: 25,9–26,3 V na condição padrão).
+-- Leitura com rotação fica fora: na partida a ignição ainda vem desligada e a tensão cai a 8,8–9,4 V (QOL-6246, 20/10).
+w AS (
+    SELECT d.unit_id, d.local_time, d.ignition, d.voltage, d.can_engine_coolant_temp, d.can_rpm, d.rpm,
+           max(CASE WHEN d.ignition THEN d.local_time END) OVER (PARTITION BY d.unit_id ORDER BY d.local_time ROWS UNBOUNDED PRECEDING) AS ult_lig
+    FROM mova.dev_status_30 d
+    WHERE d.unit_id IN (SELECT id FROM un) AND d.local_time >= :ini AND d.local_time < :ate_limite),
 s AS (
     SELECT d.unit_id, d.local_time::date AS dia,
-           percentile_cont(0.5) WITHIN GROUP (ORDER BY d.voltage) FILTER (WHERE NOT d.ignition AND d.voltage > 5) AS v_repouso,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY d.voltage)
+               FILTER (WHERE NOT d.ignition AND coalesce(d.can_rpm, d.rpm, 0) = 0 AND d.voltage > 5 AND d.local_time - d.ult_lig BETWEEN interval '2 hours' AND interval '3 hours') AS v_repouso,
+           count(*) FILTER (WHERE NOT d.ignition AND coalesce(d.can_rpm, d.rpm, 0) = 0 AND d.voltage > 5 AND d.local_time - d.ult_lig BETWEEN interval '2 hours' AND interval '3 hours') AS v_repouso_n,
            avg(d.can_engine_coolant_temp) FILTER (WHERE d.ignition AND coalesce(d.can_rpm, d.rpm) > 600
                                                   AND d.can_engine_coolant_temp BETWEEN 40 AND 130) AS temp_media
-    FROM mova.dev_status_30 d
-    WHERE d.unit_id IN (SELECT id FROM un) AND d.local_time >= :ini AND d.local_time < :ate_limite
+    FROM w d
     GROUP BY 1, 2),
 c AS (
     SELECT h.unit_id, h.dt::date AS dia, sum({litros}) / 1000.0 AS litros, sum({km_comb}) / 1000.0 AS km_comb
     FROM mova.con_driver_h_km h WHERE h.group_id = :g AND h.dt >= :ini GROUP BY 1, 2)
-SELECT coalesce(s.unit_id, c.unit_id) AS unit_id, coalesce(s.dia, c.dia) AS dia, s.v_repouso, s.temp_media,
+SELECT coalesce(s.unit_id, c.unit_id) AS unit_id, coalesce(s.dia, c.dia) AS dia, s.v_repouso, s.v_repouso_n, s.temp_media,
        c.litros, c.km_comb, CASE WHEN c.litros > 0 THEN c.km_comb / c.litros END AS km_l
 FROM s FULL JOIN c ON c.unit_id = s.unit_id AND c.dia = s.dia
 ORDER BY 1, 2
