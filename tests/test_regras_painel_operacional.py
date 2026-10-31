@@ -1,8 +1,8 @@
-"""Painel Consumo por Modelo (app/core/consumo_modelo.py) — sem banco."""
+"""Painel Operacional (app/core/painel_operacional.py) — sem banco."""
 
 from datetime import date
 
-from app.core import consumo_modelo as cm
+from app.core import painel_operacional as cm
 
 
 def _col(cols, chave):
@@ -31,6 +31,24 @@ def test_colunas_de_mes_e_a_base_oculta():
     cols = cm.periodos(date(2026, 1, 15), date(2026, 1, 14), 3)
     assert [c["chave"] for c in cols if c["tipo"] == "mes"] == ["2025-09", "2025-10", "2025-11", "2025-12"]
     assert cols[0]["oculta"] and _col(cols, "2025-10")["base"] == "2025-09"
+
+
+def test_dia_ainda_consolidando_nao_conta_como_ultimo_dado():
+    base = {date(2026, 10, d): 1780 for d in range(20, 30)}
+    assert cm.ultimo_dia_completo({**base, date(2026, 10, 30): 81}) == date(2026, 10, 29)
+    assert cm.ultimo_dia_completo({**base, date(2026, 10, 30): 1700}) == date(2026, 10, 30)
+    assert cm.ultimo_dia_completo({}) is None
+
+
+def test_hoje_usa_o_minimo_de_km_menor():
+    linhas = [{"modelo": "A", "km": 300, "km_comb": 300, "litros": 100, "segundos": 1}]
+    assert cm.agregar(linhas)[0]["A"]["insuficiente"]
+    assert not cm.agregar(linhas, cm.KM_MINIMO_HOJE)[0]["A"]["insuficiente"]
+
+
+def test_altitude_e_ponderada_pelas_leituras_e_sem_dado_nao_vira_zero():
+    assert cm.altitude_media({1: (1000.0, 10), 2: (9000.0, 10)}) == 500
+    assert cm.altitude_media({}) is None
 
 
 def test_kml_e_soma_sobre_soma_e_nao_media_de_medias():

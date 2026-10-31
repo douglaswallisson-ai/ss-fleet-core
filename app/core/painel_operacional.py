@@ -1,4 +1,4 @@
-"""Painel "Consumo por Modelo" do CCO (pedido do PM, 31/10/2026): regras sem banco.
+"""Painel Operacional do CCO (pedido do PM, 31/10/2026): regras sem banco.
 
 - km/l do período = SOMA(km) ÷ SOMA(litros), nunca média de médias; km e litros com a regra de
   plausibilidade aprovada (`app/core/combustivel.py`).
@@ -14,6 +14,13 @@ from typing import Optional
 
 #: Abaixo disso, com combustível válido no período, o km/l do modelo não é mostrado.
 KM_MINIMO = 1000.0
+#: Na coluna de hoje o dia ainda está correndo: de manhã quase nenhum modelo teria 1.000 km.
+KM_MINIMO_HOJE = 200.0
+#: Viagem fora desta faixa de km/l tem leitura de combustível impossível (sem o filtro, a frota dava 0,07 km/l em
+#: 30/10; com ele, 2,54 em 29/10 contra 2,52 do consolidado). Mesma faixa do comparativo de hoje do CCO.
+KML_VIAGEM_MIN, KML_VIAGEM_MAX = 0.8, 8.0
+#: Dia com menos que esta fração dos veículos dos dias anteriores ainda está sendo consolidado (30/10: 81 contra ~1.780).
+FRACAO_DIA_COMPLETO = 0.5
 #: Veículo só é avaliado na qualidade do dado se rodou mais que isso no período.
 KM_MIN_QUALIDADE = 1.0
 SEM_MODELO = "Sem modelo cadastrado"
@@ -68,15 +75,25 @@ def dias_do_historico(hoje: date, meses: int) -> list[date]:
     return out
 
 
-def _celula(km: float, km_comb: float, litros: float, veiculos: int) -> dict:
+def ultimo_dia_completo(contagem: dict[date, int]) -> Optional[date]:
+    """Último dia consolidado de verdade: tem ao menos metade dos veículos dos 7 dias anteriores com dado."""
+    dias = sorted(contagem)
+    for i in range(len(dias) - 1, -1, -1):
+        antes = sorted(contagem[d] for d in dias[max(0, i - 7):i])
+        if not antes or contagem[dias[i]] >= antes[len(antes) // 2] * FRACAO_DIA_COMPLETO:
+            return dias[i]
+    return None
+
+
+def _celula(km: float, km_comb: float, litros: float, veiculos: int, km_minimo: float = KM_MINIMO) -> dict:
     """km/l só com km e litros das mesmas linhas válidas; sem litros, None ("—"), nunca 0."""
     base = {"km": round(km), "km_comb": round(km_comb), "litros": round(litros), "veiculos": veiculos}
     if km_comb <= 0 or litros <= 0:
         return {**base, "kml": None, "insuficiente": False}
-    return {**base, "kml": round(km_comb / litros, 2), "insuficiente": km_comb < KM_MINIMO}
+    return {**base, "kml": round(km_comb / litros, 2), "insuficiente": km_comb < km_minimo}
 
 
-def agregar(linhas: list[dict]) -> tuple[dict[str, dict], dict]:
+def agregar(linhas: list[dict], km_minimo: float = KM_MINIMO) -> tuple[dict[str, dict], dict]:
     """Linhas por veículo (modelo, km, km_comb, litros, segundos) → células por modelo e da frota."""
     soma: dict[str, list] = {}
     km, km_comb, litros, segundos, veiculos = 0.0, 0.0, 0.0, 0.0, 0
@@ -92,10 +109,16 @@ def agregar(linhas: list[dict]) -> tuple[dict[str, dict], dict]:
         litros += r["litros"]
         segundos += r["segundos"]
         veiculos += rodou
-    celulas = {m: _celula(*v) for m, v in soma.items()}
-    frota = _celula(km, km_comb, litros, veiculos)
+    celulas = {m: _celula(*v, km_minimo) for m, v in soma.items()}
+    frota = _celula(km, km_comb, litros, veiculos, km_minimo)
     frota["velocidade"] = round(km / (segundos / 3600), 1) if segundos > 0 else None
     return celulas, frota
+
+
+def altitude_media(por_unidade: dict[int, tuple[float, int]]) -> Optional[int]:
+    """Soma das altitudes ÷ número de leituras. Sem leitura nenhuma, None ("—"), nunca 0."""
+    n = sum(x[1] for x in por_unidade.values())
+    return round(sum(x[0] for x in por_unidade.values()) / n) if n else None
 
 
 def qualidade(rodaram: set[int], sinais: dict[int, tuple[int, int, int]], ativos: set[int],
