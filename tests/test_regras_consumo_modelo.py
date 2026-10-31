@@ -43,7 +43,7 @@ def test_pouco_km_e_insuficiente_e_sem_litros_nao_vira_zero():
 
 
 def test_qualidade_conta_cada_falha_e_o_total_sem_repetir():
-    r = cm.qualidade({1, 2, 3}, {1: (1, 1, 1), 2: (0, 0, 1)}, {1, 2, 3, 4, 5}, {1, 2, 3},
+    r = cm.qualidade({1, 2, 3}, {1: (1, 1, 1), 2: (0, 0, 1)}, {1, 2, 3, 4, 5, 6}, {1, 2, 3},
                      {4: date(2026, 1, 1), 5: date(2026, 12, 1)}, date(2026, 9, 30))
-    # 2 sem rpm e pedal; 3 sem nenhuma leitura de sinal; 4 offline; 5 só começou depois do período.
+    # 2 sem rpm e pedal; 3 sem nenhuma leitura de sinal; 4 offline; 5 só começou depois do período; 6 nunca comunicou.
     assert r == {"rpm": 2, "pedal": 2, "velocidade": 1, "offline": 1, "total": 3}

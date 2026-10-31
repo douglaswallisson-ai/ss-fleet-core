@@ -102,6 +102,7 @@ def qualidade(rodaram: set[int], sinais: dict[int, tuple[int, int, int]], ativos
     rpm = {u for u in rodaram if not sinais.get(u, sem)[0]}
     pedal = {u for u in rodaram if not sinais.get(u, sem)[1]}
     vel = {u for u in rodaram if not sinais.get(u, sem)[2]}
-    # Veículo instalado depois do fim do período ainda não existia: não conta como offline.
-    off = {u for u in ativos if u not in com_leitura_no_fim and primeira_leitura.get(u, date.min) <= fim}
+    # Só conta quem já comunicou e parou. Instalado depois do fim do período ainda não existia; "ativo" sem nenhuma
+    # leitura no histórico é cadastro antigo, não falha de telemetria (eram ~1.500 de ~3.400 na conta inicial).
+    off = {u for u in ativos if u not in com_leitura_no_fim and u in primeira_leitura and primeira_leitura[u] <= fim}
     return {"rpm": len(rpm), "pedal": len(pedal), "velocidade": len(vel), "offline": len(off), "total": len(rpm | pedal | vel | off)}
