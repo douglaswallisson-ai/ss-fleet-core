@@ -657,3 +657,9 @@ async def historico(unit_id: Optional[int] = Query(None), user=Depends(require_p
     elif not (getattr(user, "master", 0) or getattr(user, "is_super_admin", False)):
         raise HTTPException(403, "Informe o veículo.")
     return {"data": rows}
+
+
+# Painel "Consumo por Modelo" (PM, 31/10/2026). Aqui, e nao em api.py, que tem mudancas de outra sessao.
+from app.api.v1.endpoints import consumo_modelo as _consumo_modelo  # noqa: E402
+
+router.include_router(_consumo_modelo.router, prefix="/consumo-modelo")
