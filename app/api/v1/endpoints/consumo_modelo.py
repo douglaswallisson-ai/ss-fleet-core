@@ -31,6 +31,9 @@ CACHE_FECHADO_S = 6 * 3600
 CACHE_ABERTO_S = 30 * 60
 PAUSA_ENTRE_DIAS_S = 1.0
 MESES_HISTORICO = 12
+#: Passeio e Pickup ficam fora da qualidade do dado (PM, 31/10/2026): em muitos o rastreador não lê esses sinais, o
+#: que é da instalação e não defeito (CECOTI: 35 "falhas" com eles, 19 sem eles). O consumo continua com todos.
+CATEGORIAS_FORA_DA_QUALIDADE = (1, 2)
 
 _cache: dict[tuple, tuple[float, object]] = {}
 _tarefa: Optional[asyncio.Task] = None
@@ -109,6 +112,13 @@ async def _ativos() -> dict[int, int]:
     return await _cacheado(("ativos",), CACHE_ABERTO_S, ler)
 
 
+async def _fora_da_qualidade() -> set[int]:
+    async def ler():
+        rows = await _ler("SELECT id FROM mova.tracked_unit WHERE unit_category_id = ANY(:c)", {"c": list(CATEGORIAS_FORA_DA_QUALIDADE)})
+        return {r["id"] for r in rows}
+    return await _cacheado(("fora_qualidade",), CACHE_ABERTO_S, ler)
+
+
 async def _calcular_historico(dias: list[date]) -> None:
     """Um dia por vez, do mais recente para o mais antigo: o painel se completa de trás para frente."""
     with _con() as c:
@@ -165,7 +175,8 @@ async def consumo_por_modelo(group_id: Optional[int] = Query(None), meses: int =
     colunas = cm.periodos(hoje, ultimo, meses)
     _iniciar_historico(hoje)
     ativos_todos = await _ativos()
-    ativos = {u for u, g in ativos_todos.items() if grupos is None or g in grupos}
+    fora = await _fora_da_qualidade()
+    ativos = {u for u, g in ativos_todos.items() if (grupos is None or g in grupos) and u not in fora}
 
     modelos: dict[str, dict] = {}
     frota, diesel, custo, veloc = {}, {}, {}, {}
@@ -185,7 +196,7 @@ async def consumo_por_modelo(group_id: Optional[int] = Query(None), meses: int =
         custo[k] = round(preco / f["kml"], 2) if preco and f["kml"] and not f["insuficiente"] else None
         lido = await asyncio.to_thread(_ler_qualidade, a, b)
         if lido:
-            rodaram = {r["unit_id"] for r in linhas if r["km"] > cm.KM_MIN_QUALIDADE}
+            rodaram = {r["unit_id"] for r in linhas if r["km"] > cm.KM_MIN_QUALIDADE and r["unit_id"] not in fora}
             res = cm.qualidade(rodaram, lido[0], ativos, lido[1], lido[2], b)
         else:
             res = {x: None for x in q}
