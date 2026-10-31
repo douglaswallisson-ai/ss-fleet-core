@@ -17,6 +17,11 @@ def test_mes_atual_compara_com_o_mesmo_periodo_do_mes_anterior():
     assert a["base"] == "anterior"
 
 
+def test_mesmo_periodo_igual_ao_mes_inteiro_nao_repete_a_coluna():
+    assert _col(cm.periodos(date(2026, 10, 31), date(2026, 10, 30), 6), "anterior")["oculta"]
+    assert not _col(cm.periodos(date(2026, 10, 16), date(2026, 10, 15), 6), "anterior")["oculta"]
+
+
 def test_dia_que_nao_existe_no_mes_anterior_e_limitado():
     b = _col(cm.periodos(date(2026, 3, 31), date(2026, 3, 31), 3), "anterior")
     assert b["fim"] == date(2026, 2, 28)

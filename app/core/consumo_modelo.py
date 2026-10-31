@@ -51,7 +51,10 @@ def periodos(hoje: date, ultimo_dado: Optional[date], meses: int) -> list[dict]:
     atual = {"chave": "atual", "rotulo": f"Mês atual (até {dia:02d}/{mes:02d})", "tipo": "atual",
              "inicio": date(ano, mes, 1), "fim": date(ano, mes, dia), "oculta": False, "base": "anterior"}
     anterior = {"chave": "anterior", "rotulo": f"Mesmo período de {NOMES_MES[mp - 1]} (até {fim_ant.day:02d}/{mp:02d})",
-                "tipo": "anterior", "inicio": date(ap, mp, 1), "fim": fim_ant, "oculta": False}
+                "tipo": "anterior", "inicio": date(ap, mp, 1), "fim": fim_ant,
+                # No último dia do mês anterior, é o mês inteiro: a coluna repetiria a do mês (PM, 31/10/2026).
+                # Continua sendo a base da variação do mês atual, só não aparece.
+                "oculta": fim_ant == _fim_mes(ap, mp)}
     return [*fechados, atual, anterior]
 
 
