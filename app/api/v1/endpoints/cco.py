@@ -663,3 +663,13 @@ async def historico(unit_id: Optional[int] = Query(None), user=Depends(require_p
 from app.api.v1.endpoints import painel_operacional as _painel_operacional  # noqa: E402
 
 router.include_router(_painel_operacional.router, prefix="/painel-operacional")
+
+# Quadro de multas (PM, 01/11/2026). Mesmo motivo: api.py tem mudancas de outra sessao.
+from app.api.v1.endpoints import multas as _multas  # noqa: E402
+
+router.include_router(_multas.router, prefix="/multas")
+
+# Gestao de pneus (PM, 01/11/2026). Mesmo motivo.
+from app.api.v1.endpoints import pneus as _pneus  # noqa: E402
+
+router.include_router(_pneus.router, prefix="/pneus")
